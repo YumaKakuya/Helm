@@ -1,0 +1,33 @@
+# Test-only fixture for VT-017 latency exclusion verification.
+# NOT loaded by production daemon. Loaded only when MCPHUB_ENABLE_SYNTHETIC=1.
+# Spec reference: Ch.10 REQ-10.3.4 — synthetic provider for VT-017.
+
+capabilities:
+  - capability_id: "synthetic_delay"
+    display_name: "synthetic_delay"
+    provider_id: "builtin-mcphub-synthetic"
+    access_class: "safe"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        delay_ms:
+          type: number
+          default: 500
+          description: "Sleep duration in milliseconds"
+    contract:
+      purpose: "Test-only tool that sleeps for configurable delay. Used by VT-017 to verify MCPHUB latency_ms excludes provider execution time."
+      may_do:
+        - "Sleep for the requested duration"
+        - "Return the actual sleep duration"
+      must_not_do:
+        - "Be exposed in production deployments (test-only)"
+      when_to_call:
+        - "VT-017 latency exclusion verification"
+      side_effect_class: "none"
+      timeout_hint_ms: 60000
+
+policy:
+  rules: []

@@ -1,0 +1,16 @@
+{
+  "name": "mcphub-adapters",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "web": "node dist/web/index.js",
+    "edit": "node dist/edit/index.js",
+    "project": "node dist/project/index.js",
+    "session": "node dist/session/index.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  }
+}

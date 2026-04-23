@@ -1,0 +1,205 @@
+package dev.sorted.mcphub;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.InputStream;
+import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Unit tests for ControlHandler.
+ * Spec: Chapter 2 §2.6, Chapter 3 §3.4, §3.10
+ */
+class ControlHandlerTest {
+
+    @TempDir
+    Path tempDir;
+
+    private ControlHandler handler;
+    private StateMachine sm;
+    private SessionManager session;
+    private DatabaseManager db;
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeEach
+    void setUp() throws Exception {
+        sm = new StateMachine();
+        session = new SessionManager();
+        db = new DatabaseManager(tempDir.resolve("test.db").toString());
+        db.open();
+        handler = new ControlHandler(sm, session, db);
+    }
+
+    @AfterEach
+    void tearDown() {
+        session.shutdown();
+        if (db != null) db.close();
+    }
+
+    @Test
+    void healthReturnsOk() throws Exception {
+        JsonNode result = handler.handle("mcphub.control.health", null);
+        assertEquals("ok", result.get("status").asText());
+        assertEquals("CLOSED", result.get("state").asText());
+    }
+
+    @Test
+    void statusReturnsClosedInitially() throws Exception {
+        JsonNode result = handler.handle("mcphub.control.status", null);
+        assertEquals("CLOSED", result.get("state").asText());
+        assertFalse(result.get("locked_until_unlock").asBoolean());
+    }
+
+    @Test
+    void armTransitionsToArmed() throws Exception {
+        JsonNode result = handler.handle("mcphub.control.arm", null);
+        assertEquals("ARMED", result.get("state").asText());
+        assertNotNull(result.get("session_id"));
+    }
+
+    @Test
+    void openTransitionsToOpen() throws Exception {
+        handler.handle("mcphub.control.arm", null);
+        JsonNode result = handler.handle("mcphub.control.open", null);
+        assertEquals("OPEN", result.get("state").asText());
+    }
+
+    @Test
+    void closeFromOpenTransitionsToClosed() throws Exception {
+        handler.handle("mcphub.control.arm", null);
+        handler.handle("mcphub.control.open", null);
+        JsonNode result = handler.handle("mcphub.control.close", null);
+        assertEquals("CLOSED", result.get("state").asText());
+    }
+
+    @Test
+    void lockFromOpenTransitionsToClosed() throws Exception {
+        handler.handle("mcphub.control.arm", null);
+        handler.handle("mcphub.control.open", null);
+        JsonNode result = handler.handle("mcphub.control.lock",
+            mapper.readTree("{\"lock_reason\":\"test\"}"));
+        assertEquals("CLOSED", result.get("state").asText());
+        assertTrue(result.get("locked_until_unlock").asBoolean());
+    }
+
+    @Test
+    void lockFromClosedTransitionsToClosed() throws Exception {
+        JsonNode result = handler.handle("mcphub.control.lock",
+            mapper.readTree("{\"lock_reason\":\"test\"}"));
+        assertEquals("CLOSED", result.get("state").asText());
+        assertTrue(result.get("locked_until_unlock").asBoolean());
+    }
+
+    @Test
+    void lockPreventsArm() throws Exception {
+        handler.handle("mcphub.control.arm", null);
+        handler.handle("mcphub.control.lock", null);
+        assertThrows(JsonRpcServer.JsonRpcException.class,
+            () -> handler.handle("mcphub.control.arm", null));
+    }
+
+    @Test
+    void unlockAllowsArmAfterLock() throws Exception {
+        handler.handle("mcphub.control.arm", null);
+        handler.handle("mcphub.control.lock", null);
+        handler.handle("mcphub.control.unlock", null);
+        // Should succeed now
+        JsonNode result = handler.handle("mcphub.control.arm", null);
+        assertEquals("ARMED", result.get("state").asText());
+    }
+
+    @Test
+    void unknownMethodThrows() {
+        assertThrows(JsonRpcServer.JsonRpcException.class,
+            () -> handler.handle("mcphub.unknown.method", null));
+    }
+
+    @Test
+    void sessionLogPopulatedAfterArm() throws Exception {
+        handler.handle("mcphub.control.arm", null);
+        try (var st = db.getConnection().createStatement();
+             var rs = st.executeQuery("SELECT * FROM session_log WHERE to_state='ARMED'")) {
+            assertTrue(rs.next(), "session_log should have ARMED entry");
+        }
+    }
+
+    @Test
+    void capabilities_withHealthTracker_reportsRealHealth() throws Exception {
+        ControlHandler capabilitiesHandler = createCapabilityAwareHandler();
+
+        ProviderHealthTracker tracker = new ProviderHealthTracker();
+        capabilitiesHandler.setHealthTracker(tracker);
+        tracker.updateGroup("web", "running");
+        tracker.updateGroup("edit", "stopped");
+
+        JsonNode r = capabilitiesHandler.handle("mcphub.control.capabilities", null);
+        JsonNode caps = r.path("capabilities");
+        assertTrue(caps.isArray() && caps.size() > 0, "capabilities array should not be empty");
+
+        boolean foundWebfetch = false;
+        boolean foundApplyPatch = false;
+        for (JsonNode cap : caps) {
+            if ("webfetch".equals(cap.path("display_name").asText())) {
+                assertEquals("running", cap.path("provider_health").asText(),
+                        "webfetch should report running (its group 'web' was marked running)");
+                foundWebfetch = true;
+            }
+            if ("apply_patch".equals(cap.path("display_name").asText())) {
+                assertEquals("stopped", cap.path("provider_health").asText(),
+                        "apply_patch should report stopped (its group 'edit' was marked stopped)");
+                foundApplyPatch = true;
+            }
+        }
+        assertTrue(foundWebfetch, "webfetch must appear in capabilities");
+        assertTrue(foundApplyPatch, "apply_patch must appear in capabilities");
+    }
+
+    @Test
+    void capabilities_withoutHealthTracker_reportsUnavailable() throws Exception {
+        ControlHandler capabilitiesHandler = createCapabilityAwareHandler();
+
+        JsonNode r = capabilitiesHandler.handle("mcphub.control.capabilities", null);
+        JsonNode caps = r.path("capabilities");
+        assertTrue(caps.isArray() && caps.size() > 0, "capabilities array should not be empty");
+
+        for (JsonNode cap : caps) {
+            assertEquals("unavailable", cap.path("provider_health").asText(),
+                    "without tracker, provider_health must default to unavailable");
+        }
+    }
+
+    @Test
+    void coolingDown_clearsHealthTracker() throws Exception {
+        ProviderHealthTracker tracker = new ProviderHealthTracker();
+        handler.setHealthTracker(tracker);
+        tracker.updateGroup("web", "running");
+        assertEquals("running", tracker.getGroupHealth("web"));
+
+        sm.transition(StateMachine.Trigger.ARM, "s1");
+        sm.transition(StateMachine.Trigger.OPEN, "s1");
+        sm.transition(StateMachine.Trigger.CLOSE, "s1");
+
+        assertEquals("unavailable", tracker.getGroupHealth("web"),
+                "Tracker must be cleared on COOLING_DOWN transition");
+    }
+
+    private ControlHandler createCapabilityAwareHandler() throws Exception {
+        CapabilityRegistry registry = new CapabilityRegistry();
+        try (InputStream is = ControlHandlerTest.class.getResourceAsStream("/capabilities.yaml")) {
+            assertNotNull(is, "capabilities.yaml must be in classpath");
+            registry.load(is);
+        }
+
+        PolicyEngine policy = new PolicyEngine();
+        policy.loadGlobalRules(registry.getPolicyRules());
+
+        BodyBudgetService bodyBudget = new BodyBudgetService(db);
+        bodyBudget.setMcphubHostedToolCount(registry.getLoadedCount());
+
+        return new ControlHandler(sm, session, db, registry, policy, bodyBudget);
+    }
+}

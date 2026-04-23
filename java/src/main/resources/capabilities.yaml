@@ -1,0 +1,687 @@
+capabilities:
+  - capability_id: "webfetch"
+    display_name: "webfetch"
+    provider_id: "builtin-hatch"
+    access_class: "restricted"
+    rw_boundary: "execute"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        url:
+          type: string
+          description: "URL to fetch"
+        method:
+          type: string
+          default: "GET"
+          description: "HTTP method (default: GET)"
+        body:
+          type: string
+          description: "Request body (optional, for POST/PUT)"
+        headers:
+          type: object
+          description: "Request headers as key-value pairs (optional)"
+      required: [url]
+    contract:
+      purpose: "Fetch content from a URL (HTTP/HTTPS). Use for web page reading, API calls, or downloading resources. Modifies external state."
+      may_do:
+        - "Perform HTTP GET, POST, or other methods to external URLs"
+        - "Return response body content"
+      must_not_do:
+        - "Cache responses"
+        - "Store credentials in route log"
+      when_to_call:
+        - "The user asks to read a web page or call an external API"
+        - "A URL is provided and external content retrieval is the goal"
+      when_not_to_call:
+        - "The task requires only local file reading"
+        - "A local tool would suffice"
+      side_effect_class: "external_state"
+      timeout_hint_ms: 30000
+      disambiguates_from:
+        - capability_id: "websearch"
+          distinction: "webfetch fetches a specific known URL; websearch discovers URLs via search query"
+
+  - capability_id: "websearch"
+    display_name: "websearch"
+    provider_id: "builtin-hatch"
+    access_class: "safe"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: "Search query string"
+      required: [query]
+    contract:
+      purpose: "Search the web for pages matching a query. Returns a list of results with titles, URLs, and snippets. Read-only."
+      may_do:
+        - "Issue web search queries and return result lists"
+      must_not_do:
+        - "Fetch full page content (use webfetch for that)"
+        - "Submit forms or make state-changing requests"
+      when_to_call:
+        - "The user asks to search the web or find information about a topic"
+        - "The URL is not yet known and discovery via search is needed"
+      when_not_to_call:
+        - "The URL is already known; use webfetch instead"
+      side_effect_class: "none"
+      timeout_hint_ms: 10000
+      disambiguates_from:
+        - capability_id: "webfetch"
+          distinction: "websearch finds pages by query; webfetch fetches a specific URL"
+        - capability_id: "codesearch"
+          distinction: "websearch searches the public web; codesearch searches the local codebase"
+
+  - capability_id: "todowrite"
+    display_name: "todowrite"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        todos:
+          type: array
+          items:
+            type: object
+      required: [todos]
+    contract:
+      purpose: "Write or update the AI task list (todos). Use to track multi-step work in progress."
+      may_do:
+        - "Create, update, or replace the current todo list"
+      must_not_do:
+        - "Delete user files"
+        - "Make external network calls"
+      when_to_call:
+        - "The AI needs to track a multi-step task plan"
+        - "The user asks to update or clear the task list"
+      when_not_to_call:
+        - "A simple one-step task is being performed"
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+
+  - capability_id: "list"
+    display_name: "list"
+    provider_id: "builtin-hatch"
+    access_class: "safe"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
+    contract:
+      purpose: "List files and directories at a given path. Read-only filesystem operation."
+      may_do:
+        - "Return directory listing for the given path"
+      must_not_do:
+        - "Modify files"
+        - "Traverse symlinks outside the workspace"
+      when_to_call:
+        - "The user asks what files are in a directory"
+        - "Directory content exploration is needed"
+      when_not_to_call:
+        - "A recursive search is needed; use codesearch or glob instead"
+      side_effect_class: "none"
+      timeout_hint_ms: 5000
+
+  - capability_id: "apply_patch"
+    display_name: "apply_patch"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        patch:
+          type: string
+          description: "Unified diff patch content"
+        cwd:
+          type: string
+          description: "Working directory to apply patch in (optional, defaults to current)"
+      required: [patch]
+    contract:
+      purpose: "Apply a unified diff patch to files in the workspace. Modifies local file state."
+      may_do:
+        - "Apply unified diff patches to existing files"
+        - "Create new files if the patch specifies them"
+      must_not_do:
+        - "Apply patches outside the workspace root"
+        - "Make network calls"
+      when_to_call:
+        - "A patch or diff has been prepared and needs to be applied to files"
+      when_not_to_call:
+        - "Direct file editing is simpler; use edit or write instead"
+      side_effect_class: "local_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "codesearch"
+    display_name: "codesearch"
+    provider_id: "builtin-hatch"
+    access_class: "safe"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        pattern:
+          type: string
+          description: "Search pattern (regex)"
+        path:
+          type: string
+          description: "Root path to search in (optional, defaults to cwd)"
+        include:
+          type: string
+          description: "File glob filter (e.g. '*.ts', optional)"
+      required: [pattern]
+    contract:
+      purpose: "Search the local codebase for files or content matching a pattern. Read-only."
+      may_do:
+        - "Search file content with regex or glob patterns"
+        - "Return matching file paths and line numbers"
+      must_not_do:
+        - "Modify files"
+        - "Search external URLs"
+      when_to_call:
+        - "The user needs to find code, functions, or strings in the codebase"
+      when_not_to_call:
+        - "Searching the web; use websearch instead"
+        - "Listing a specific directory; use list instead"
+      side_effect_class: "none"
+      timeout_hint_ms: 15000
+      disambiguates_from:
+        - capability_id: "websearch"
+          distinction: "codesearch searches local files; websearch searches the public web"
+
+  - capability_id: "lsp"
+    display_name: "lsp"
+    provider_id: "builtin-hatch"
+    access_class: "safe"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        command:
+          type: string
+          description: "LSP command (definition, references, hover)"
+        file:
+          type: string
+          description: "Source file path"
+        line:
+          type: number
+          description: "Line number (1-indexed, optional)"
+        character:
+          type: number
+          description: "Character offset (optional)"
+      required: [command, file]
+    contract:
+      purpose: "Query Language Server Protocol information: go-to-definition, hover, references. Read-only."
+      may_do:
+        - "Query LSP for definitions, references, hover information"
+      must_not_do:
+        - "Modify source files"
+        - "Restart language servers"
+      when_to_call:
+        - "Precise symbol navigation or type information is needed"
+      when_not_to_call:
+        - "Simple pattern search suffices; use codesearch instead"
+      side_effect_class: "none"
+      timeout_hint_ms: 10000
+
+  - capability_id: "plan_enter"
+    display_name: "plan_enter"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        plan:
+          type: string
+    contract:
+      purpose: "Enter planning mode. Commits the AI to a plan before execution begins."
+      may_do:
+        - "Record the current plan and enter plan-confirmed state"
+      must_not_do:
+        - "Execute the plan immediately without confirmation"
+      when_to_call:
+        - "The user has confirmed a plan and execution should proceed"
+      when_not_to_call:
+        - "No plan exists yet; draft the plan first"
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+      disambiguates_from:
+        - capability_id: "plan_exit"
+          distinction: "plan_enter begins plan execution; plan_exit ends it"
+
+  - capability_id: "plan_exit"
+    display_name: "plan_exit"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        summary:
+          type: string
+    contract:
+      purpose: "Exit planning mode after execution is complete. Records plan completion."
+      may_do:
+        - "Mark the current plan as complete and exit plan-confirmed state"
+      must_not_do:
+        - "Discard uncommitted work without recording it"
+      when_to_call:
+        - "The plan has been fully executed and planning mode should end"
+      when_not_to_call:
+        - "The plan is still in progress"
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+      disambiguates_from:
+        - capability_id: "plan_enter"
+          distinction: "plan_exit ends plan execution; plan_enter begins it"
+
+  - capability_id: "skill"
+    display_name: "skill"
+    provider_id: "builtin-hatch"
+    access_class: "safe"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        name:
+          type: string
+      required: [name]
+    contract:
+      purpose: "Load and apply a named skill definition. Skills are operator-defined reusable instruction sets."
+      may_do:
+        - "Read skill definition by name and return its content"
+      must_not_do:
+        - "Modify skill files"
+        - "Execute destructive actions from skill definitions without confirmation"
+      when_to_call:
+        - "A named skill needs to be applied to the current task"
+      when_not_to_call:
+        - "No relevant skill exists for the task"
+      side_effect_class: "none"
+      timeout_hint_ms: 5000
+
+  - capability_id: "batch"
+    display_name: "batch"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "execute"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        operations:
+          type: array
+          items:
+            type: object
+      required: [operations]
+    contract:
+      purpose: "Execute a batch of multiple tool operations in sequence. Use when many operations must run as a unit."
+      may_do:
+        - "Execute multiple tool calls in order as specified"
+      must_not_do:
+        - "Exceed the configured batch size limit"
+        - "Skip operations without recording the skip"
+      when_to_call:
+        - "Multiple related operations must run atomically or sequentially"
+      when_not_to_call:
+        - "Only a single operation is needed; call it directly"
+      side_effect_class: "local_state"
+      timeout_hint_ms: 60000
+
+  - capability_id: "coffer_clipboard"
+    display_name: "coffer_clipboard"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "execute"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        secret_id:
+          type: string
+          description: "ID of the secret to copy"
+      required: [secret_id]
+    contract:
+      purpose: "Copy a secret value to clipboard for a short-lived operator handoff."
+      may_do: ["Copy one secret value to system clipboard"]
+      must_not_do: ["Leak secret values outside Coffer-controlled clipboard flow"]
+      when_to_call: ["Operator explicitly requests clipboard copy of a known secret_id"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_create_project"
+    display_name: "coffer_create_project"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        name:
+          type: string
+          description: "Project name"
+        path:
+          type: string
+          description: "Filesystem path for the project"
+      required: [name, path]
+    contract:
+      purpose: "Create a new project in Coffer vault metadata."
+      may_do: ["Create vault project records"]
+      must_not_do: ["Leak secret values outside Coffer responses"]
+      when_to_call: ["Initializing secret-vault structure for a new project"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_create_service"
+    display_name: "coffer_create_service"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        project_id:
+          type: string
+          description: "Project ID (UUID) or project name"
+        name:
+          type: string
+          description: "Service name"
+        type:
+          type: string
+          description: "Service type: api_key, account, or note"
+      required: [project_id, name, type]
+    contract:
+      purpose: "Create a service under an existing Coffer project."
+      may_do: ["Create service records for secret grouping"]
+      must_not_do: ["Leak secret values outside Coffer responses"]
+      when_to_call: ["Adding a new secret bucket/service in an existing project"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_delete"
+    display_name: "coffer_delete"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        secret_id:
+          type: string
+          description: "ID of the secret to delete"
+      required: [secret_id]
+    contract:
+      purpose: "Delete a secret from Coffer storage."
+      may_do: ["Remove a secret by ID"]
+      must_not_do: ["Leak deleted secret contents"]
+      when_to_call: ["Operator requests secret removal"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_list_projects"
+    display_name: "coffer_list_projects"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties: {}
+      required: []
+    contract:
+      purpose: "List projects available in Coffer vault."
+      may_do: ["Return project metadata"]
+      must_not_do: ["Expose secret values"]
+      when_to_call: ["Enumerating projects before project/service selection"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_list_services"
+    display_name: "coffer_list_services"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        project_id:
+          type: string
+          description: "Project ID (UUID) to list services for"
+      required: [project_id]
+    contract:
+      purpose: "List services inside a specific Coffer project."
+      may_do: ["Return service metadata for a project"]
+      must_not_do: ["Expose secret values"]
+      when_to_call: ["Selecting service before store/retrieve operations"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_lock"
+    display_name: "coffer_lock"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties: {}
+      required: []
+    contract:
+      purpose: "Lock Coffer vault in-memory state."
+      may_do: ["Transition vault to locked state"]
+      must_not_do: ["Leak secret values during lock transition"]
+      when_to_call: ["Ending a secret operation session"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_mask"
+    display_name: "coffer_mask"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        project_id:
+          type: string
+          description: "Optional project ID for user-defined patterns"
+        text:
+          type: string
+          description: "Text to scan and mask"
+      required: [text]
+    contract:
+      purpose: "Mask secret-like patterns in text using Coffer rules."
+      may_do: ["Return masked text output"]
+      must_not_do: ["Return unmasked discovered secret values"]
+      when_to_call: ["Sanitizing logs or text before display/share"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_purge"
+    display_name: "coffer_purge"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties: {}
+      required: []
+    contract:
+      purpose: "Purge in-memory secrets and lock the vault."
+      may_do: ["Erase in-memory secrets and lock vault state"]
+      must_not_do: ["Leak secret values during purge"]
+      when_to_call: ["Emergency or session-end secret hygiene"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_retrieve"
+    display_name: "coffer_retrieve"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        secret_id:
+          type: string
+          description: "ID of the secret to retrieve"
+      required: [secret_id]
+    contract:
+      purpose: "Retrieve and decrypt a secret value from Coffer vault."
+      may_do: ["Return decrypted secret for authorized retrieval"]
+      must_not_do: ["Leak secret values outside intended tool response"]
+      when_to_call: ["A known secret_id must be resolved to its value"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_search"
+    display_name: "coffer_search"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: "Search term to match against key names"
+      required: [query]
+    contract:
+      purpose: "Search secret metadata by key name without returning secret values."
+      may_do: ["Return secret metadata matches"]
+      must_not_do: ["Return secret values in search results"]
+      when_to_call: ["Finding candidate secret IDs by name"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_setup"
+    display_name: "coffer_setup"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        password:
+          type: string
+          description: "Master password for the vault (minimum 8 characters)"
+      required: [password]
+    contract:
+      purpose: "Initialize a new Coffer vault with a master password."
+      may_do: ["Create and initialize new vault state"]
+      must_not_do: ["Echo or log sensitive passwords"]
+      when_to_call: ["Bootstrapping Coffer vault for first use"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_store"
+    display_name: "coffer_store"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        service_id:
+          type: string
+          description: "Service ID to store the secret under"
+        key_name:
+          type: string
+          description: "Name/label for the secret"
+        key_value:
+          type: string
+          description: "Secret value to store. WARNING: This value is visible to the AI. For sensitive data, use 'coffer store' CLI instead."
+      required: [service_id, key_name, key_value]
+    contract:
+      purpose: "Store a secret value under a Coffer service."
+      may_do: ["Create a secret record under the specified service"]
+      must_not_do: ["Expose secret values outside Coffer response contract"]
+      when_to_call: ["Adding a new secret to vault storage"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+  - capability_id: "coffer_update"
+    display_name: "coffer_update"
+    provider_id: "coffer-relay-alpha"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        secret_id:
+          type: string
+          description: "ID of the secret to update"
+        key_name:
+          type: string
+          description: "New key name"
+        key_value:
+          type: string
+          description: "New secret value"
+      required: [secret_id, key_name, key_value]
+    contract:
+      purpose: "Update an existing secret record in Coffer vault."
+      may_do: ["Modify secret metadata and/or value"]
+      must_not_do: ["Leak previous or updated secret values in logs"]
+      when_to_call: ["Rotating or correcting stored secrets"]
+      side_effect_class: "external_state"
+      timeout_hint_ms: 10000
+
+policy:
+  rules:
+    - rule_id: "default-allow-all"
+      tool_pattern: "*"
+      action: "allow"
+      priority: 1
+      scope: "global"

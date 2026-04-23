@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.sorted.mcphub</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{MCPHUB_INSTALL_PATH}}</string>
+    <string>_daemon</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MCPHUB_DATA_DIR</key>
+    <string>${HOME}/.local/share/mcphub</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>${HOME}/.local/share/mcphub/logs/mcphub.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>${HOME}/.local/share/mcphub/logs/mcphub.err.log</string>
+</dict>
+</plist>

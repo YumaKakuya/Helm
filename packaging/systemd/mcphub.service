@@ -1,0 +1,14 @@
+[Unit]
+Description=MCPHUB Daemon
+After=network.target
+
+[Service]
+Type=notify
+ExecStart={{MCPHUB_INSTALL_PATH}} _daemon
+ExecStop={{MCPHUB_INSTALL_PATH}} stop
+Restart=on-failure
+RestartSec=5
+Environment=MCPHUB_DATA_DIR=%h/.local/share/mcphub
+
+[Install]
+WantedBy=default.target

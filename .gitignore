@@ -1,0 +1,55 @@
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.class
+*.jar
+!java/gradle/wrapper/gradle-wrapper.jar
+target/
+build/
+dist/
+out/
+bin/
+
+# Go
+*.exe
+*.test
+vendor/
+/mcphub
+
+# Java
+.gradle/
+.settings/
+.project
+.classpath
+
+# Node (if management UI)
+node_modules/
+.npm/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Secrets
+*.pem
+*.key
+credentials*
+
+# Data
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
