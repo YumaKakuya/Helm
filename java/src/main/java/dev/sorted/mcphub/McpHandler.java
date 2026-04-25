@@ -558,21 +558,16 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
             case "todowrite", "list", "codesearch", "lsp" -> "project";
             case "plan_enter", "plan_exit", "skill", "batch" -> "session";
             case "synthetic_delay" -> "synthetic";
-            default -> {
-                var entry = registry.findByDisplayName(toolName);
-                if (entry.isPresent()
-                        && entry.get().providerId != null
-                        && entry.get().providerId.startsWith("coffer-")) {
-                    yield "relay";
-                }
-                yield "unknown";
-            }
+            default -> "unknown";
         };
     }
 
     private String providerTypeForEntry(CapabilityEntry entry) {
-        if (entry != null && entry.providerId != null && entry.providerId.startsWith("coffer-")) {
-            return "relay";
+        if (entry != null && providerManager != null) {
+            String groupId = providerManager.resolveGroupId(entry.displayName);
+            if ("relay".equals(providerManager.getProviderType(groupId))) {
+                return "relay";
+            }
         }
         return "builtin_hosted";
     }

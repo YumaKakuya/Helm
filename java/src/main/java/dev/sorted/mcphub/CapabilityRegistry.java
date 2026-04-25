@@ -330,9 +330,6 @@ public class CapabilityRegistry {
 
     /** Map display_name to adapter group ID (mirror of McpHandler.resolveGroupId). */
     public static String groupForTool(String displayName) {
-        if (displayName != null && displayName.startsWith("coffer_")) {
-            return "relay";
-        }
         return switch (displayName) {
             case "webfetch", "websearch" -> "web";
             case "apply_patch" -> "edit";

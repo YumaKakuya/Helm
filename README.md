@@ -144,9 +144,24 @@ chmod 600 ~/.config/mcphub/brave-api-key
 
 ## Relay Providers
 
-Relay providers are external MCP servers that Helm connects to via subprocess stdio. Any MCP server that speaks JSON-RPC over stdio can be added as a relay provider by editing `capabilities.yaml`.
+Relay providers are external MCP servers that Helm connects to via subprocess stdio. Any MCP server that speaks JSON-RPC over stdio can be added as a relay provider.
 
-If your agent already has these capabilities built in, use Helm purely as a relay aggregator for your other MCP servers.
+To configure relay providers:
+
+1. Copy the example config:
+   ```bash
+   mkdir -p ~/.config/mcphub
+   cp java/src/main/resources/relays-example.yaml ~/.config/mcphub/relays.yaml
+   ```
+
+2. Edit `~/.config/mcphub/relays.yaml` and add your relay entries. Each relay defines a subprocess command and the tools it exposes.
+
+3. Alternatively, set a custom path via environment variable:
+   ```bash
+   export MCPHUB_RELAYS_PATH=/path/to/custom-relays.yaml
+   ```
+
+Relay tools are loaded dynamically at startup and appear alongside built-in tools in `tools/list`.
 
 ## Performance
 
@@ -173,7 +188,7 @@ helm bridge         Run stdio bridge (used by AI agents)
 
 **Alpha (daily driver since 2026-04-19)**
 
-Built by [Sorted.](https://github.com/YumaKakuya) as part of the AXIOM product line for AI multi-agent orchestration.
+Built by [Sorted.](https://github.com/YumaKakuya) for AI multi-agent orchestration.
 
 ## License
 

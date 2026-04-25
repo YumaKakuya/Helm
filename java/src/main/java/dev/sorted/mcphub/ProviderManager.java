@@ -3,11 +3,13 @@ package dev.sorted.mcphub;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -89,10 +91,7 @@ public class ProviderManager {
             new GroupConfig("session", "session/index.js", null,
                     new String[]{"plan_enter", "plan_exit", "skill", "batch"}, "builtin_hosted"),
             new GroupConfig("synthetic", "synthetic/index.js", null,
-                    new String[]{"synthetic_delay"}, "builtin_hosted"),
-            new GroupConfig("relay", null,
-                    new String[]{System.getProperty("user.home") + "/coffer-standalone/coffer", "mcp-server"},
-                    new String[]{}, "relay")
+                    new String[]{"synthetic_delay"}, "builtin_hosted")
         );
     }
 
@@ -111,6 +110,68 @@ public class ProviderManager {
             }
         }
         return "unknown";
+    }
+
+    /** Lookup the providerType for a given group ID. */
+    public String getProviderType(String groupId) {
+        for (GroupConfig g : groups) {
+            if (g.id.equals(groupId)) {
+                return g.providerType;
+            }
+        }
+        return "unknown";
+    }
+
+    /**
+     * Load relay provider groups from an external YAML config file.
+     * Format:
+     * relays:
+     *   - id: "my-relay"
+     *     command: ["/path/to/binary", "arg1"]
+     *     tools: ["tool_a", "tool_b"]
+     *
+     * @return list of loaded GroupConfig entries with providerType "relay"
+     */
+    public static List<GroupConfig> loadRelays(java.nio.file.Path configPath) {
+        List<GroupConfig> result = new ArrayList<>();
+        if (!Files.exists(configPath)) {
+            return result;
+        }
+        try {
+            ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+            yamlMapper.findAndRegisterModules();
+            JsonNode root = yamlMapper.readTree(configPath.toFile());
+            JsonNode relays = root.path("relays");
+            if (relays.isArray()) {
+                for (JsonNode relay : relays) {
+                    String id = relay.path("id").asText(null);
+                    JsonNode cmdNode = relay.get("command");
+                    List<String> cmdList = new ArrayList<>();
+                    if (cmdNode != null && cmdNode.isArray()) {
+                        for (JsonNode c : cmdNode) {
+                            cmdList.add(c.asText());
+                        }
+                    }
+                    JsonNode toolsNode = relay.get("tools");
+                    List<String> toolsList = new ArrayList<>();
+                    if (toolsNode != null && toolsNode.isArray()) {
+                        for (JsonNode t : toolsNode) {
+                            toolsList.add(t.asText());
+                        }
+                    }
+                    if (id != null && !id.isBlank() && !cmdList.isEmpty()) {
+                        result.add(new GroupConfig(id, null,
+                                cmdList.toArray(new String[0]),
+                                toolsList.toArray(new String[0]), "relay"));
+                    } else {
+                        log.warn("Skipping invalid relay entry: missing id or command");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to load relay config from {}: {}", configPath, e.getMessage());
+        }
+        return result;
     }
 
     /** Start all provider groups. Called on session Open. */

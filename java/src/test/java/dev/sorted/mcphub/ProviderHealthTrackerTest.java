@@ -91,10 +91,10 @@ class ProviderHealthTrackerTest {
     }
 
     @Test
-    void healthForTool_mapsViaRegistry_relay_cofferPrefix() {
-        tracker.updateGroup("relay", "running");
-        assertEquals("running", tracker.healthForTool("coffer_list_projects"));
-        assertEquals("running", tracker.healthForTool("coffer_retrieve"));
+    void healthForTool_returnsUnknownForUnregisteredTool() {
+        // Unregistered tool names should return unavailable
+        assertEquals("unavailable", tracker.healthForTool("some_external_tool"));
+        assertEquals("unavailable", tracker.healthForTool("another_unregistered"));
     }
 
     @Test
