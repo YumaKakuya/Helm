@@ -104,10 +104,19 @@ public class StdioBridge {
 
     /** Send session-detach notification to daemon (best-effort). */
     private void sendDetach() {
-        // Multi-session safety: do NOT send close on bridge detach.
-        // In multi-Hatch environments, one bridge disconnecting must not
-        // kill the session for other active bridges.
-        // Session cleanup is handled by idle timeout (REQ-3.7.4, 300s default).
+        // Notify daemon so it can track last-bridge-exit and auto-close.
+        ObjectNode req = mapper.createObjectNode();
+        req.put("jsonrpc", "2.0");
+        req.put("method", "mcphub.control.bridge_detach");
+        req.set("params", mapper.createObjectNode());
+        try {
+            String response = forwardToDaemon(mapper.writeValueAsString(req));
+            if (response == null) {
+                log.warn("bridge_detach notification failed: daemon unreachable");
+            }
+        } catch (Exception e) {
+            log.warn("bridge_detach notification failed: {}", e.getMessage());
+        }
         log.info("Bridge detaching (session kept open for other bridges)");
     }
 

@@ -3,9 +3,11 @@ package dev.sorted.mcphub;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -180,7 +182,38 @@ public class Main {
             adapterBase = findAdapterDir();
         }
         ProviderHealthTracker healthTracker = new ProviderHealthTracker();
-        ProviderManager providerManager = new ProviderManager(adapterBase, ProviderManager.defaultGroups());
+
+        // Load user-configured relay providers
+        Path relaysPath = Path.of(
+            System.getenv().getOrDefault("MCPHUB_RELAYS_PATH",
+                System.getProperty("user.home") + "/.config/mcphub/relays.yaml"));
+        List<ProviderManager.GroupConfig> allGroups = new ArrayList<>(ProviderManager.defaultGroups());
+        allGroups.addAll(ProviderManager.loadRelays(relaysPath));
+
+        // Load relay capabilities if present
+        if (Files.exists(relaysPath)) {
+            try {
+                ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+                yamlMapper.findAndRegisterModules();
+                JsonNode root = yamlMapper.readTree(relaysPath.toFile());
+                JsonNode relaysNode = root.path("relays");
+                if (relaysNode.isArray()) {
+                    for (JsonNode relay : relaysNode) {
+                        JsonNode caps = relay.get("capabilities");
+                        if (caps != null && caps.isArray() && !caps.isEmpty()) {
+                            ObjectNode wrapper = yamlMapper.createObjectNode();
+                            wrapper.set("capabilities", caps);
+                            byte[] bytes = yamlMapper.writeValueAsBytes(wrapper);
+                            registry.loadAdditional(new ByteArrayInputStream(bytes));
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Failed to load relay capabilities from {}: {}", relaysPath, e.getMessage());
+            }
+        }
+
+        ProviderManager providerManager = new ProviderManager(adapterBase, allGroups);
         providerManager.setHealthTracker(healthTracker);
         providerManager.setRegistry(registry);
 

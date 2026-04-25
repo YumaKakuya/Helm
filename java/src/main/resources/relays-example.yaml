@@ -1,0 +1,35 @@
+# Helm relay provider configuration
+# Copy to ~/.config/mcphub/relays.yaml and edit for your setup.
+#
+# Each relay entry defines an external MCP server that Helm will
+# spawn as a subprocess and route tool calls to.
+#
+# Format:
+#   relays:
+#     - id: "unique-relay-id"
+#       command: ["/path/to/binary", "arg1", "arg2"]
+#       tools: ["tool_name_1", "tool_name_2"]
+#       capabilities:             # optional: full capability definitions
+#         - capability_id: "tool_name_1"
+#           display_name: "tool_name_1"
+#           provider_id: "my-provider"
+#           access_class: "safe"
+#           rw_boundary: "read"
+#           enabled: true
+#           priority: 10
+#           schema:
+#             type: object
+#             properties:
+#               query:
+#                 type: string
+#           contract:
+#             purpose: "What this tool does"
+#             may_do: ["allowed actions"]
+#             must_not_do: ["forbidden actions"]
+#             side_effect_class: "none"
+#             timeout_hint_ms: 30000
+#
+# Environment variable override:
+#   MCPHUB_RELAYS_PATH=/path/to/custom-relays.yaml
+
+relays: []

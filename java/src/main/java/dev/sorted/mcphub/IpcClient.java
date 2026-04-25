@@ -33,7 +33,16 @@ public class IpcClient {
      * @throws IOException if the daemon is not running or connection fails
      */
     public static Response call(String method, JsonNode params) throws IOException {
-        UnixDomainSocketAddress addr = UnixDomainSocketAddress.of(DaemonServer.socketPath());
+        return call(method, params, DaemonServer.socketPath());
+    }
+
+    /**
+     * Send a JSON-RPC request to the daemon at the specified socket path.
+     * Package-private for testability.
+     * @throws IOException if the daemon is not running or connection fails
+     */
+    static Response call(String method, JsonNode params, java.nio.file.Path socketPath) throws IOException {
+        UnixDomainSocketAddress addr = UnixDomainSocketAddress.of(socketPath);
         try (SocketChannel channel = SocketChannel.open(StandardProtocolFamily.UNIX)) {
             channel.connect(addr);
 

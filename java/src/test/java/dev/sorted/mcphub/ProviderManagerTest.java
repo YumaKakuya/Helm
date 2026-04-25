@@ -27,7 +27,7 @@ class ProviderManagerTest {
         assertEquals("edit", groups.get(1).id());
         assertEquals("project", groups.get(2).id());
         assertEquals("session", groups.get(3).id());
-        assertEquals("relay", groups.get(4).id());
+        assertEquals("synthetic", groups.get(4).id());
     }
 
     @Test

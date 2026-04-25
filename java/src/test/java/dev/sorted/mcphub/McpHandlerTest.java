@@ -78,7 +78,7 @@ class McpHandlerTest {
     }
 
     @Test
-    void toolsList_whenOpen_returns25PlusDisambiguation() throws Exception {
+    void toolsList_whenOpen_returns11PlusDisambiguation() throws Exception {
         // Arm and open the session
         sm.transition(StateMachine.Trigger.ARM, "s1");
         sm.transition(StateMachine.Trigger.OPEN, "s1");
@@ -86,16 +86,11 @@ class McpHandlerTest {
         confirmGroup("edit", "apply_patch");
         confirmGroup("project", "todowrite", "list", "codesearch", "lsp");
         confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
-        // Session 4: Coffer relay (14 tools)
-        confirmGroup("relay", "coffer_clipboard", "coffer_create_project", "coffer_create_service",
-                "coffer_delete", "coffer_list_projects", "coffer_list_services", "coffer_lock",
-                "coffer_mask", "coffer_purge", "coffer_retrieve", "coffer_search", "coffer_setup",
-                "coffer_store", "coffer_update");
 
         JsonNode r = handler.handle("tools/list", null);
         JsonNode tools = r.path("tools");
-        // 25 registered tools (11 builtin-hosted + 14 Coffer relay) + 1 disambiguation = 26
-        assertEquals(26, tools.size(), "Expected 25 capabilities + 1 disambiguation tool");
+        // 11 registered tools (builtin-hosted) + 1 disambiguation = 12
+        assertEquals(12, tools.size(), "Expected 11 capabilities + 1 disambiguation tool");
 
         // Verify disambiguation tool is present
         boolean hasDisambig = false;
@@ -125,7 +120,6 @@ class McpHandlerTest {
         confirmGroup("edit", "apply_patch");
         confirmGroup("project", "todowrite", "list", "codesearch", "lsp");
         confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
-        confirmGroup("relay", "coffer_clipboard", "coffer_create_project", "coffer_create_service", "coffer_delete", "coffer_list_projects", "coffer_list_services", "coffer_lock", "coffer_mask", "coffer_purge", "coffer_retrieve", "coffer_search", "coffer_setup", "coffer_store", "coffer_update");
 
         JsonNode r = handler.handle("tools/list", null);
         for (JsonNode t : r.path("tools")) {
@@ -157,7 +151,6 @@ class McpHandlerTest {
         confirmGroup("edit", "apply_patch");
         confirmGroup("project", "todowrite", "list", "codesearch", "lsp");
         confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
-        confirmGroup("relay", "coffer_clipboard", "coffer_create_project", "coffer_create_service", "coffer_delete", "coffer_list_projects", "coffer_list_services", "coffer_lock", "coffer_mask", "coffer_purge", "coffer_retrieve", "coffer_search", "coffer_setup", "coffer_store", "coffer_update");
 
         ObjectNode params = mapper.createObjectNode();
         params.put("name", "nonexistent_tool_xyz");
@@ -225,7 +218,6 @@ class McpHandlerTest {
         confirmGroup("edit", "apply_patch");
         confirmGroup("project", "todowrite", "list", "codesearch", "lsp");
         confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
-        confirmGroup("relay", "coffer_clipboard", "coffer_create_project", "coffer_create_service", "coffer_delete", "coffer_list_projects", "coffer_list_services", "coffer_lock", "coffer_mask", "coffer_purge", "coffer_retrieve", "coffer_search", "coffer_setup", "coffer_store", "coffer_update");
 
         ObjectNode params = mapper.createObjectNode();
         params.put("name", "mcphub_disambiguate");

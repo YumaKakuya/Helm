@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Dispatches JSON-RPC control methods to the state machine.
@@ -38,6 +39,7 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
     private PolicyEngine policy;
     private BodyBudgetService bodyBudget;
     private ProviderHealthTracker healthTracker;
+    private final AtomicInteger activeBridgeCount = new AtomicInteger(0);
 
     /** Backward-compatible constructor (Session 1 tests). */
     public ControlHandler(StateMachine stateMachine, SessionManager sessionManager,
@@ -101,6 +103,15 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             if (healthTracker != null && to == StateMachine.State.COOLING_DOWN) {
                 healthTracker.clear();
             }
+            // Track active bridge count for last-bridge-exit auto-close
+            if (from == StateMachine.State.CLOSED && to != StateMachine.State.CLOSED) {
+                activeBridgeCount.incrementAndGet();
+                log.info("Session started, active bridges: {}", activeBridgeCount.get());
+            }
+            if (to == StateMachine.State.CLOSED) {
+                activeBridgeCount.set(0);
+                log.info("Session closed, active bridges reset to 0");
+            }
         });
 
         // Wire session timeout callbacks
@@ -145,6 +156,7 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             case "mcphub.control.arm"          -> handleArm();
             case "mcphub.control.open"         -> handleOpen();
             case "mcphub.control.close"        -> handleClose();
+            case "mcphub.control.bridge_detach"-> handleBridgeDetach();
             case "mcphub.control.lock"         -> handleLock(params);
             case "mcphub.control.unlock"       -> handleUnlock();
             case "mcphub.control.health"       -> handleHealth();
@@ -349,6 +361,34 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
         r.set("capabilities", caps);
         r.put("loaded_count", registry.getLoadedCount());
         r.put("rejected_count", registry.getRejectedCount());
+        return r;
+    }
+
+    /** mcphub.control.bridge_detach — decrement bridge count; close session when last bridge leaves. */
+    private JsonNode handleBridgeDetach() {
+        int count = activeBridgeCount.updateAndGet(c -> c > 0 ? c - 1 : 0);
+        log.info("Bridge detached. Active bridges: {}", count);
+        if (count == 0) {
+            String sessionId = sessionManager.getCurrentSessionId();
+            StateMachine.State current = stateMachine.getState();
+            try {
+                if (current == StateMachine.State.ARMED) {
+                    stateMachine.transition(StateMachine.Trigger.CLOSE, sessionId);
+                    sessionManager.endSession();
+                } else if (current == StateMachine.State.OPEN) {
+                    stateMachine.transition(StateMachine.Trigger.CLOSE, sessionId);
+                    doCoolingDownAndClose(sessionId, "bridge_detach");
+                }
+            } catch (StateMachine.TransitionException e) {
+                log.warn("Bridge-triggered close transition failed: {}", e.getMessage());
+            }
+            ObjectNode r = mapper.createObjectNode();
+            r.put("state", stateMachine.getState().name());
+            r.put("mcphub_providers", "stop");
+            return r;
+        }
+        ObjectNode r = mapper.createObjectNode();
+        r.put("status", "ok");
         return r;
     }
 

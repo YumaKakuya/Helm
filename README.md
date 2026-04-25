@@ -34,11 +34,11 @@ AI Agent (OpenCode / Claude Code / Cursor)
 |        |                                          |
 +--------|------------------------------------------+
          |
-    +---------+---------+---------+---------+
-    |  web    |  edit   | project | session |  <-- TypeScript adapters
-    +---------+---------+---------+---------+
-    | relay providers (Coffer, custom MCP)  |
-    +--------------------------------------+
+     +---------+---------+---------+---------+-----------+
+     |  web    |  edit   | project | session | synthetic |  <-- TS adapters
+     +---------+---------+---------+---------+-----------+
+     | relay providers (your existing MCP servers)        |
+     +---------------------------------------------------+
 ```
 
 Core capabilities:
@@ -135,14 +135,33 @@ chmod 600 ~/.config/mcphub/brave-api-key
 
 ## Hosted Tools
 
-| Adapter | Tools |
-|---------|-------|
-| web | `webfetch`, `websearch` |
-| edit | `apply_patch` |
-| project | `todowrite`, `list`, `codesearch`, `lsp` |
-| session | `plan_enter`, `plan_exit`, `skill`, `batch` |
+| Adapter | Tools | Type |
+|---------|-------|------|
+| web | `webfetch`, `websearch` | builtin |
+| edit | `apply_patch` | builtin |
+| project | `todowrite`, `list`, `codesearch`, `lsp` | builtin |
+| session | `plan_enter`, `plan_exit`, `skill`, `batch` | builtin |
 
-If your agent already has these capabilities built in, use Helm purely as a relay aggregator for your other MCP servers.
+## Relay Providers
+
+Relay providers are external MCP servers that Helm connects to via subprocess stdio. Any MCP server that speaks JSON-RPC over stdio can be added as a relay provider.
+
+To configure relay providers:
+
+1. Copy the example config:
+   ```bash
+   mkdir -p ~/.config/mcphub
+   cp java/src/main/resources/relays-example.yaml ~/.config/mcphub/relays.yaml
+   ```
+
+2. Edit `~/.config/mcphub/relays.yaml` and add your relay entries. Each relay defines a subprocess command and the tools it exposes.
+
+3. Alternatively, set a custom path via environment variable:
+   ```bash
+   export MCPHUB_RELAYS_PATH=/path/to/custom-relays.yaml
+   ```
+
+Relay tools are loaded dynamically at startup and appear alongside built-in tools in `tools/list`.
 
 ## Performance
 
@@ -169,7 +188,7 @@ helm bridge         Run stdio bridge (used by AI agents)
 
 **Alpha (daily driver since 2026-04-19)**
 
-Built by [Sorted.](https://github.com/YumaKakuya) as part of the AXIOM product line for AI multi-agent orchestration.
+Built by [Sorted.](https://github.com/YumaKakuya) for AI multi-agent orchestration.
 
 ## License
 

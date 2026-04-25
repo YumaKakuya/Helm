@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// VT-025: Route a call to a secret-adjacent provider (Coffer) and verify
-// the response payload does not contain raw secret values.
+// VT-025: Route a call to any registered tool and verify the response
+// payload does not contain raw secret values.
 // REQ-10.3.6: MUST use pattern-matching scan on response payload.
 func TestVT_025_NoSecretInResponsePayload(t *testing.T) {
 	if testing.Short() {
@@ -21,13 +21,14 @@ func TestVT_025_NoSecretInResponsePayload(t *testing.T) {
 	armAndOpen(t, sockPath)
 	defer closeSession(t, sockPath)
 
+	// Use a builtin tool to verify secret scanning on response payloads.
 	params := map[string]interface{}{
-		"name":      "coffer_list_projects",
+		"name":      "list",
 		"arguments": map[string]interface{}{},
 	}
 	result, rpcErr := call(t, sockPath, "tools/call", params)
 	if rpcErr != nil {
-		t.Skipf("VT-025: coffer not reachable (vault may be locked): %v", rpcErr.Message)
+		t.Skipf("VT-025: tool not reachable: %v", rpcErr.Message)
 	}
 
 	payload := string(result)
