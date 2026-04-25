@@ -46,10 +46,12 @@ Core capabilities:
 - **Single MCP endpoint** aggregating multiple tool providers
 - **Classifier-invisible path** for tools (avoids Anthropic API body-size limits)
 - **Session lifecycle** (Closed / Armed / Open / CoolingDown) with auto-close
-- **Allow/deny policy** per tool
-- **Route logging** for observability
-- **Disambiguation endpoint** (AI asks the hub which tool to use)
+- **Allow/deny policy** per tool, with session-scoped rule injection
+- **Structured failure responses** with error codes, recovery guidance, and fallback suggestions
+- **Route logging** for observability, with intent annotation support
+- **Contract-based disambiguation** (AI asks the hub which tool to use; hub resolves from capability contracts)
 - **Body-budget monitoring** to detect regressions early
+- **Secret scrub** on intent annotations before persistence
 
 ## Quick Start
 
@@ -119,15 +121,17 @@ chmod 600 ~/.config/mcphub/brave-api-key
 | Tool exposure governance | Working |
 | Route logging and observability | Working |
 | Multi-MCP-server aggregation | Working |
-| Disambiguation | Working |
+| Disambiguation | Working (contract-based resolution) |
 | Body-budget monitoring | Working |
+| Intent annotation | Working (schema-documented, route-logged, secret-scrubbed) |
+| Session-scoped policy rules | Working |
+| Structured failure recovery | Working (error codes, fallback guidance, next actions) |
 
 ## What It Does Not Solve Yet
 
 | Item | Status |
 |------|--------|
 | Task-context filtering | Planned |
-| Intent annotation | Planned |
 | Result caching | Planned |
 | Dry-run mode | Planned |
 | Management UI | Not started |
@@ -183,6 +187,14 @@ helm lock           Emergency lock
 helm capabilities   List registered tools
 helm bridge         Run stdio bridge (used by AI agents)
 ```
+
+The daemon also exposes a control surface for runtime policy management:
+
+```
+mcphub.control.add_session_rule   Add a session-scoped allow/deny/hide rule
+```
+
+Session rules are automatically purged when the session closes.
 
 ## Project Status
 
