@@ -20,14 +20,15 @@ import static org.junit.jupiter.api.Assertions.*;
 class ProviderManagerTest {
 
     @Test
-    void defaultGroups_contains5Groups() {
+    void defaultGroups_contains6Groups() {
         List<ProviderManager.GroupConfig> groups = ProviderManager.defaultGroups();
-        assertEquals(5, groups.size());
+        assertEquals(6, groups.size());
         assertEquals("web", groups.get(0).id());
         assertEquals("edit", groups.get(1).id());
         assertEquals("project", groups.get(2).id());
         assertEquals("session", groups.get(3).id());
-        assertEquals("relay", groups.get(4).id());
+        assertEquals("synthetic", groups.get(4).id());
+        assertEquals("relay", groups.get(5).id());
     }
 
     @Test

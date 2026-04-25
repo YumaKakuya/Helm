@@ -88,6 +88,8 @@ public class ProviderManager {
                     new String[]{"todowrite", "list", "codesearch", "lsp"}, "builtin_hosted"),
             new GroupConfig("session", "session/index.js", null,
                     new String[]{"plan_enter", "plan_exit", "skill", "batch"}, "builtin_hosted"),
+            new GroupConfig("synthetic", "synthetic/index.js", null,
+                    new String[]{"synthetic_delay"}, "builtin_hosted"),
             new GroupConfig("relay", null,
                     new String[]{System.getProperty("user.home") + "/coffer-standalone/coffer", "mcp-server"},
                     new String[]{}, "relay")

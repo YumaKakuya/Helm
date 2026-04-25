@@ -34,11 +34,11 @@ AI Agent (OpenCode / Claude Code / Cursor)
 |        |                                          |
 +--------|------------------------------------------+
          |
-    +---------+---------+---------+---------+
-    |  web    |  edit   | project | session |  <-- TypeScript adapters
-    +---------+---------+---------+---------+
-    | relay providers (Coffer, custom MCP)  |
-    +--------------------------------------+
+     +---------+---------+---------+---------+-----------+
+     |  web    |  edit   | project | session | synthetic |  <-- TS adapters
+     +---------+---------+---------+---------+-----------+
+     | relay providers (your existing MCP servers)        |
+     +---------------------------------------------------+
 ```
 
 Core capabilities:
@@ -135,12 +135,16 @@ chmod 600 ~/.config/mcphub/brave-api-key
 
 ## Hosted Tools
 
-| Adapter | Tools |
-|---------|-------|
-| web | `webfetch`, `websearch` |
-| edit | `apply_patch` |
-| project | `todowrite`, `list`, `codesearch`, `lsp` |
-| session | `plan_enter`, `plan_exit`, `skill`, `batch` |
+| Adapter | Tools | Type |
+|---------|-------|------|
+| web | `webfetch`, `websearch` | builtin |
+| edit | `apply_patch` | builtin |
+| project | `todowrite`, `list`, `codesearch`, `lsp` | builtin |
+| session | `plan_enter`, `plan_exit`, `skill`, `batch` | builtin |
+
+## Relay Providers
+
+Relay providers are external MCP servers that Helm connects to via subprocess stdio. Any MCP server that speaks JSON-RPC over stdio can be added as a relay provider by editing `capabilities.yaml`.
 
 If your agent already has these capabilities built in, use Helm purely as a relay aggregator for your other MCP servers.
 
