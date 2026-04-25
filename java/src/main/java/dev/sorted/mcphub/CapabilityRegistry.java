@@ -291,6 +291,13 @@ public class CapabilityRegistry {
             .findFirst();
     }
 
+    /** Finds a capability by its capability_id. */
+    public Optional<CapabilityEntry> findByCapabilityId(String capabilityId) {
+        return entries.stream()
+            .filter(e -> e.capabilityId.equals(capabilityId))
+            .findFirst();
+    }
+
     /** Returns all entries where enabled=true. */
     public List<CapabilityEntry> getEnabled() {
         return entries.stream()

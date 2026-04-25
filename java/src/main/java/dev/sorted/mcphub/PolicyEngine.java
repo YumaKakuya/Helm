@@ -71,7 +71,9 @@ public class PolicyEngine {
             boosted.ruleId = r.ruleId;
             boosted.toolPattern = r.toolPattern;
             boosted.action = r.action;
-            boosted.priority = r.priority + 10000;
+            // REQ-7.5.2: session rules have higher default priority than global,
+            // unless operator explicitly sets negative priority (opt-out of boost)
+            boosted.priority = r.priority >= 0 ? r.priority + 10000 : r.priority;
             boosted.scope = "session";
             allRules.add(boosted);
         }

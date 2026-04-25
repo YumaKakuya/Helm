@@ -180,6 +180,26 @@ class PolicyEngineTest {
         assertEquals(PolicyEngine.Decision.ALLOW, engine.evaluate("webfetch").decision());
     }
 
+    @Test
+    void sessionRule_withExplicitHighPriority_beatsGlobalRule() {
+        // REQ-7.5.2: session rule priority 200 → boosted to 10200, beating global 1000
+        engine.loadGlobalRules(List.of(rule("global-deny", "webfetch", "deny", 1000)));
+        PolicyRule sessionRule = rule("session-allow", "webfetch", "allow", 200);
+        sessionRule.scope = "session";
+        engine.addSessionRule(sessionRule);
+        assertEquals(PolicyEngine.Decision.ALLOW, engine.evaluate("webfetch").decision());
+    }
+
+    @Test
+    void sessionRule_withNegativePriority_doesNotOverrideGlobalRule() {
+        // REQ-7.5.2: negative priority = explicit opt-out of boost
+        engine.loadGlobalRules(List.of(rule("global-deny", "webfetch", "deny", 100)));
+        PolicyRule sessionRule = rule("session-allow", "webfetch", "allow", -1);
+        sessionRule.scope = "session";
+        engine.addSessionRule(sessionRule);
+        assertEquals(PolicyEngine.Decision.DENY, engine.evaluate("webfetch").decision());
+    }
+
     // --- Helpers ---
 
     private PolicyRule rule(String id, String pattern, String action, int priority) {
