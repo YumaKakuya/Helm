@@ -32,9 +32,13 @@ vendor/
 .project
 .classpath
 
-# Node (if management UI)
+# Node
 node_modules/
 .npm/
+
+# Adapter build output
+adapters/dist/
+adapters/node_modules/
 
 # Environment
 .env
