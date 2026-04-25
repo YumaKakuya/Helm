@@ -18,7 +18,9 @@ var mcphubRoutingFailureCodes = map[string]struct{}{
 	"session_not_open":     {},
 	"tool_not_found":       {},
 	"tool_denied":          {},
-	"provider_unavailable": {},
+	"provider_unreachable": {},
+	"provider_error":       {},
+	"internal_error":       {},
 }
 
 var vtTools = []struct {

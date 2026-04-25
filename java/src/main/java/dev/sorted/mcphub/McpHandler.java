@@ -8,8 +8,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -168,12 +170,34 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         tool.put("description", desc);
 
         // inputSchema from registry entry
+        JsonNode schemaNode;
         if (entry.schema != null) {
-            tool.set("inputSchema", mapper.valueToTree(entry.schema));
+            schemaNode = mapper.valueToTree(entry.schema);
         } else {
             ObjectNode emptySchema = mapper.createObjectNode();
             emptySchema.put("type", "object");
-            tool.set("inputSchema", emptySchema);
+            schemaNode = emptySchema;
+        }
+        tool.set("inputSchema", schemaNode);
+
+        // REQ-5.5.4: inject _intent into inputSchema so AI clients discover it
+        if (schemaNode instanceof ObjectNode schemaObj) {
+            JsonNode propsNode = schemaObj.get("properties");
+            ObjectNode props;
+            if (propsNode instanceof ObjectNode) {
+                props = (ObjectNode) propsNode;
+            } else {
+                props = mapper.createObjectNode();
+                schemaObj.set("properties", props);
+            }
+            if (!props.has("_intent")) {
+                ObjectNode intentProp = mapper.createObjectNode();
+                intentProp.put("type", "string");
+                intentProp.put("description",
+                    "Optional: brief reason WHY you chose this tool. " +
+                    "Persisted in route logs for auditing. Does not affect routing.");
+                props.set("_intent", intentProp);
+            }
         }
         return tool;
     }
@@ -199,6 +223,13 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         candidateTools.set("items", items);
         candidateTools.put("description", "Optional: restrict to these tool names");
         props.set("candidate_tools", candidateTools);
+        // REQ-5.5.4: inject _intent so AI clients discover it
+        ObjectNode intentProp = mapper.createObjectNode();
+        intentProp.put("type", "string");
+        intentProp.put("description",
+            "Optional: brief reason WHY you chose this tool. " +
+            "Persisted in route logs for auditing. Does not affect routing.");
+        props.set("_intent", intentProp);
         schema.set("properties", props);
         ArrayNode required = mapper.createArrayNode();
         required.add("task_description");
@@ -218,6 +249,10 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         // Truncate intent annotation per REQ-5.10.3 (max 500 chars)
         if (intentAnnotation != null && intentAnnotation.length() > 500) {
             intentAnnotation = intentAnnotation.substring(0, 500);
+        }
+        // REQ-5.5.5, REQ-5.10.3: scrub secret patterns from intent annotation
+        if (intentAnnotation != null && SecretScanner.containsSecret(intentAnnotation)) {
+            intentAnnotation = "[scrubbed: secret pattern detected]";
         }
 
         int requestSizeBytes = params != null ? params.toString().length() : 0;
@@ -281,10 +316,10 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         if (!"confirmed".equals(entry.runtimeState)) {
             long latency = System.currentTimeMillis() - startMs;
             logRoute(null, toolName, entry.providerId, providerType,
-                    "error", null, latency, requestSizeBytes, null, intentAnnotation, "provider_unavailable");
+                    "error", null, latency, requestSizeBytes, null, intentAnnotation, "provider_unreachable");
             List<String> available = policy.filterForAI(registry.getConfirmed())
                     .stream().map(e -> e.displayName).collect(Collectors.toList());
-            return failureResponse("provider_unavailable",
+            return failureResponse("provider_unreachable",
                     "Tool '" + toolName + "' is registered but its provider adapter is not running.",
                     "wait_session", available, null);
         }
@@ -296,9 +331,12 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
             logRoute(null, toolName, entry.providerId, providerType,
                     "denied", policyResult.matchedRuleId(), latency, requestSizeBytes, null,
                     intentAnnotation, "tool_denied");
+            List<String> contractFallbacks = findContractFallbacks(entry);
+            String nextAction = (contractFallbacks != null && !contractFallbacks.isEmpty())
+                    ? "use_alternative" : "disambiguate";
             return failureResponse("tool_denied",
                     "Tool '" + toolName + "' is denied by policy rule: " + policyResult.matchedRuleId(),
-                    "abort", null, policyResult.matchedRuleId());
+                    nextAction, null, policyResult.matchedRuleId(), entry);
         }
         if (policyResult.decision() == PolicyEngine.Decision.HIDE) {
             long latency = System.currentTimeMillis() - startMs;
@@ -339,9 +377,9 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
                 long latency = providerStartMs - startMs;
                 logRoute(null, toolName, entry.providerId, providerType,
                         "error", policyResult.matchedRuleId(), latency,
-                        requestSizeBytes, null, intentAnnotation, "provider_call_failed");
-                return failureResponse("provider_call_failed",
-                        "Provider '" + groupId + "' call failed: " + e.getMessage(),
+                        requestSizeBytes, null, intentAnnotation, "provider_error");
+                return failureResponse("provider_error",
+                        "Provider '" + groupId + "' returned an error. Retry or check provider health.",
                         "retry", null, null);
             }
         } else {
@@ -349,10 +387,10 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
             long latency = System.currentTimeMillis() - startMs;
             logRoute(null, toolName, entry.providerId, providerType,
                     "error", policyResult.matchedRuleId(), latency,
-                    requestSizeBytes, null, intentAnnotation, "provider_unavailable");
+                    requestSizeBytes, null, intentAnnotation, "provider_unreachable");
             List<String> available = policy.filterForAI(registry.getConfirmed())
                     .stream().map(e2 -> e2.displayName).collect(Collectors.toList());
-            return failureResponse("provider_unavailable",
+            return failureResponse("provider_unreachable",
                     "Provider group '" + groupId + "' is not running.",
                     "wait_session", available, null);
         }
@@ -410,32 +448,95 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
             result.put("unresolvable_reason",
                 "Registry has no enabled, policy-allowed tools to recommend.");
         } else {
-            // Multiple candidates — cannot determine deterministically (REQ-5.3.3 forbids heuristic)
-            result.putNull("recommended_tool"); // REQ-5.3.6: MUST be null when not deterministic
-            result.put("confidence", "none");
-            result.put("reason",
-                candidates.size() + " tools are available. Hub cannot select without heuristic " +
-                "guessing, which is prohibited by REQ-5.3.3. " +
-                "Narrow via 'candidate_tools' to a single tool for a deterministic answer.");
-            result.put("unresolvable_reason",
-                "Multiple tools match. Use candidate_tools to specify exactly one tool.");
+            // Multiple candidates — try contract-based resolution (REQ-5.3.3, REQ-5.3.8)
+            CapabilityEntry contractWinner = resolveByContracts(taskDescription, candidates);
+            if (contractWinner != null) {
+                result.put("recommended_tool", contractWinner.displayName);
+                result.put("confidence", "deterministic");
+                result.put("reason",
+                    "Contract-based disambiguation: '" + contractWinner.displayName +
+                    "' unambiguously covers all other candidates via disambiguates_from entries.");
+                result.putNull("unresolvable_reason");
+            } else {
+                result.putNull("recommended_tool"); // REQ-5.3.6: MUST be null when not deterministic
+                result.put("confidence", "none");
+                result.put("reason",
+                    candidates.size() + " tools are available. Hub cannot select without heuristic " +
+                    "guessing, which is prohibited by REQ-5.3.3. " +
+                    "Narrow via 'candidate_tools' to a single tool for a deterministic answer.");
+                result.put("unresolvable_reason",
+                    "Multiple tools match. Use candidate_tools to specify exactly one tool.");
+            }
         }
 
         // REQ-5.3.4: alternatives — list all candidates when no deterministic recommendation
-        // When confidence=deterministic (1 candidate), alternatives is empty.
+        // When confidence=deterministic (1 candidate or contract winner), alternatives is empty.
         ArrayNode alts = mapper.createArrayNode();
-        if (candidates.size() != 1) {
+        boolean deterministic = candidates.size() == 1
+                || (candidates.size() > 1 && resolveByContracts(taskDescription, candidates) != null);
+        if (!deterministic) {
             for (CapabilityEntry e : candidates) {
                 if (e.contract == null || e.contract.purpose == null) continue;
                 ObjectNode alt = mapper.createObjectNode();
                 alt.put("tool", e.displayName);
                 alt.put("reason", e.contract.purpose);
+                if (e.contract.sideEffectClass != null) {
+                    alt.put("side_effect_class", e.contract.sideEffectClass);
+                }
+                if (e.contract.whenToCall != null) {
+                    ArrayNode wtc = mapper.createArrayNode();
+                    e.contract.whenToCall.forEach(wtc::add);
+                    alt.set("when_to_call", wtc);
+                }
+                if (e.contract.disambiguatesFrom != null) {
+                    ArrayNode dfArr = mapper.createArrayNode();
+                    for (CapabilityContract.DisambiguatesFrom df : e.contract.disambiguatesFrom) {
+                        ObjectNode d = mapper.createObjectNode();
+                        d.put("capability_id", df.capabilityId);
+                        d.put("distinction", df.distinction);
+                        dfArr.add(d);
+                    }
+                    alt.set("disambiguates_from", dfArr);
+                }
                 alts.add(alt);
             }
         }
         result.set("alternatives", alts);
 
         return result;
+    }
+
+    /**
+     * Deterministic contract-based resolution among multiple candidates.
+     * REQ-5.3.3: no heuristic. REQ-5.3.8: deterministic when contracts unambiguously select one.
+     *
+     * @return the single candidate whose disambiguates_from covers ALL other candidates,
+     *         or null if ambiguous.
+     */
+    private CapabilityEntry resolveByContracts(String taskDescription, List<CapabilityEntry> candidates) {
+        if (candidates == null || candidates.size() < 2) return null;
+        CapabilityEntry winner = null;
+        int winnerCount = 0;
+        for (CapabilityEntry candidate : candidates) {
+            if (candidate.contract == null || candidate.contract.disambiguatesFrom == null) continue;
+            Set<String> coveredIds = candidate.contract.disambiguatesFrom.stream()
+                    .map(df -> df.capabilityId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+            boolean coversAllOthers = true;
+            for (CapabilityEntry other : candidates) {
+                if (other == candidate) continue;
+                if (!coveredIds.contains(other.capabilityId)) {
+                    coversAllOthers = false;
+                    break;
+                }
+            }
+            if (coversAllOthers) {
+                winner = candidate;
+                winnerCount++;
+            }
+        }
+        return winnerCount == 1 ? winner : null;
     }
 
     // -------------------------------------------------------------------------
@@ -501,28 +602,59 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
 
     /** Build structured failure response. REQ-5.6.1 (P1-03) — MCP CallToolResult compliant */
     private ObjectNode failureResponse(String errorCode, String reason,
-            String nextAction, List<String> fallbackTools, String policyDetail) {
+            String nextAction, List<String> availableTools, String policyDetail) {
+        return failureResponse(errorCode, reason, nextAction, availableTools, policyDetail, null);
+    }
+
+    private ObjectNode failureResponse(String errorCode, String reason,
+            String nextAction, List<String> availableTools, String policyDetail, CapabilityEntry entry) {
         ObjectNode r = mapper.createObjectNode();
-        // MCP-compliant content array (REQ-5.6.1 structured failure as text)
         ArrayNode content = mapper.createArrayNode();
         ObjectNode textItem = mapper.createObjectNode();
         textItem.put("type", "text");
-        StringBuilder msg = new StringBuilder();
-        msg.append("[MCPHUB error] ").append(errorCode).append(": ").append(reason);
-        if (nextAction != null) {
-            msg.append(" | next_action: ").append(nextAction);
-        }
-        if (policyDetail != null) {
-            msg.append(" | policy: ").append(policyDetail);
-        }
+
+        ObjectNode structured = mapper.createObjectNode();
+        structured.put("error_code", errorCode);
+        structured.put("reason", reason);
+        if (nextAction != null) structured.put("next_action", nextAction);
+        if (policyDetail != null) structured.put("policy_detail", policyDetail);
+
+        List<String> fallbackTools = entry != null ? findContractFallbacks(entry) : null;
         if (fallbackTools != null && !fallbackTools.isEmpty()) {
-            msg.append(" | available_tools: ").append(String.join(", ", fallbackTools));
+            ArrayNode ft = mapper.createArrayNode();
+            fallbackTools.forEach(ft::add);
+            structured.set("fallback_tools", ft);
         }
-        textItem.put("text", msg.toString());
+
+        if (availableTools != null && !availableTools.isEmpty()) {
+            ArrayNode at = mapper.createArrayNode();
+            availableTools.forEach(at::add);
+            structured.set("available_tools", at);
+        }
+
+        textItem.put("text", structured.toString());
         content.add(textItem);
         r.set("content", content);
         r.put("isError", true);
         return r;
+    }
+
+    /** Look up disambiguates_from entries and return registered tool names. REQ-5.6.5 */
+    private List<String> findContractFallbacks(CapabilityEntry entry) {
+        if (entry == null || entry.contract == null || entry.contract.disambiguatesFrom == null) {
+            return null;
+        }
+        List<String> result = new ArrayList<>();
+        for (CapabilityContract.DisambiguatesFrom df : entry.contract.disambiguatesFrom) {
+            if (df.capabilityId != null) {
+                registry.findByCapabilityId(df.capabilityId).ifPresent(e -> {
+                    if (policy.evaluate(e.displayName).decision() == PolicyEngine.Decision.ALLOW) {
+                        result.add(e.displayName);
+                    }
+                });
+            }
+        }
+        return result.isEmpty() ? null : result;
     }
 
     /** Fire-and-forget route log (IS-05, REQ-8.3.2: async, must not block) */

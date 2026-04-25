@@ -152,15 +152,16 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             sessionManager.resetActivity();
         }
         return switch (method) {
-            case "mcphub.control.status"       -> handleStatus();
-            case "mcphub.control.arm"          -> handleArm();
-            case "mcphub.control.open"         -> handleOpen();
-            case "mcphub.control.close"        -> handleClose();
-            case "mcphub.control.bridge_detach"-> handleBridgeDetach();
-            case "mcphub.control.lock"         -> handleLock(params);
-            case "mcphub.control.unlock"       -> handleUnlock();
-            case "mcphub.control.health"       -> handleHealth();
-            case "mcphub.control.capabilities" -> handleCapabilities();
+            case "mcphub.control.status"           -> handleStatus();
+            case "mcphub.control.arm"              -> handleArm();
+            case "mcphub.control.open"             -> handleOpen();
+            case "mcphub.control.close"            -> handleClose();
+            case "mcphub.control.bridge_detach"    -> handleBridgeDetach();
+            case "mcphub.control.lock"             -> handleLock(params);
+            case "mcphub.control.unlock"           -> handleUnlock();
+            case "mcphub.control.health"           -> handleHealth();
+            case "mcphub.control.capabilities"     -> handleCapabilities();
+            case "mcphub.control.add_session_rule" -> handleAddSessionRule(params);
             default -> throw new JsonRpcServer.JsonRpcException(
                 JsonRpcServer.ERR_NOT_FOUND, "Unknown method: " + method);
         };
@@ -395,6 +396,43 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /** mcphub.control.add_session_rule — REQ-7.5.1 */
+    private JsonNode handleAddSessionRule(JsonNode params) throws JsonRpcServer.JsonRpcException {
+        StateMachine.State current = stateMachine.getState();
+        if (current != StateMachine.State.ARMED && current != StateMachine.State.OPEN) {
+            throw new JsonRpcServer.JsonRpcException(-32001,
+                "add_session_rule requires Armed or Open state");
+        }
+        if (params == null || !params.has("tool_pattern") || !params.has("action")) {
+            throw new JsonRpcServer.JsonRpcException(-32602,
+                "Missing required params: tool_pattern and action");
+        }
+        String toolPattern = params.get("tool_pattern").asText();
+        String action = params.get("action").asText().toLowerCase();
+        if (!"allow".equals(action) && !"deny".equals(action) && !"hide".equals(action)) {
+            throw new JsonRpcServer.JsonRpcException(-32602,
+                "Invalid action: " + action + ". Must be allow, deny, or hide.");
+        }
+
+        PolicyRule rule = new PolicyRule();
+        rule.ruleId = params.has("rule_id") ? params.get("rule_id").asText()
+                : ("session-" + toolPattern + "-" + action);
+        rule.toolPattern = toolPattern;
+        rule.action = action;
+        rule.priority = params.has("priority") ? params.get("priority").asInt(100) : 100;
+        rule.scope = "session";
+
+        policy.addSessionRule(rule);
+        log.info("Added session rule: id={}, pattern={}, action={}", rule.ruleId, toolPattern, action);
+
+        ObjectNode r = mapper.createObjectNode();
+        r.put("status", "ok");
+        r.put("rule_id", rule.ruleId);
+        r.put("scope", "session");
+        r.put("state", current.name());
+        return r;
+    }
 
     /** Simulate drain and transition to CLOSED. (Session 1: immediate drain) */
     private void doCoolingDownAndClose(String sessionId, String trigger) {
