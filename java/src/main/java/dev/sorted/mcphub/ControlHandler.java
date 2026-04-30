@@ -8,7 +8,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -40,6 +47,9 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
     private BodyBudgetService bodyBudget;
     private ProviderHealthTracker healthTracker;
     private final AtomicInteger activeBridgeCount = new AtomicInteger(0);
+    private final Set<Long> bridgePids = ConcurrentHashMap.newKeySet();
+    private final Map<Long, Instant> bridgeLastPing = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService janitorExecutor;
 
     /** Backward-compatible constructor (Session 1 tests). */
     public ControlHandler(StateMachine stateMachine, SessionManager sessionManager,
@@ -51,7 +61,13 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
         this.policy = null;
         this.bodyBudget = null;
         this.healthTracker = null;
+        this.janitorExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mcphub-bridge-janitor");
+            t.setDaemon(true);
+            return t;
+        });
         wireCallbacks();
+        janitorExecutor.scheduleWithFixedDelay(this::janitorTask, 60, 60, TimeUnit.SECONDS);
     }
 
     /** Full constructor for Session 2+. */
@@ -65,7 +81,18 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
         this.policy = policy;
         this.bodyBudget = bodyBudget;
         this.healthTracker = null;
+        this.janitorExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mcphub-bridge-janitor");
+            t.setDaemon(true);
+            return t;
+        });
         wireCallbacks();
+        janitorExecutor.scheduleWithFixedDelay(this::janitorTask, 60, 60, TimeUnit.SECONDS);
+    }
+
+    /** Shutdown the bridge janitor executor. Call on daemon shutdown or test teardown. */
+    public void shutdown() {
+        janitorExecutor.shutdownNow();
     }
 
     /** Optional wiring for REQ-4.7.2 runtime provider health visibility. */
@@ -103,13 +130,11 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             if (healthTracker != null && to == StateMachine.State.COOLING_DOWN) {
                 healthTracker.clear();
             }
-            // Track active bridge count for last-bridge-exit auto-close
-            if (from == StateMachine.State.CLOSED && to != StateMachine.State.CLOSED) {
-                activeBridgeCount.incrementAndGet();
-                log.info("Session started, active bridges: {}", activeBridgeCount.get());
-            }
+            // Defensive cleanup when session fully closes
             if (to == StateMachine.State.CLOSED) {
                 activeBridgeCount.set(0);
+                bridgePids.clear();
+                bridgeLastPing.clear();
                 log.info("Session closed, active bridges reset to 0");
             }
         });
@@ -118,6 +143,10 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
         sessionManager.setTimeoutCallback(new SessionManager.TimeoutCallback() {
             @Override
             public void onIdleTimeout(String sessionId) {
+                if (activeBridgeCount.get() > 0) {
+                    log.debug("Idle timeout suppressed: {} bridges attached", activeBridgeCount.get());
+                    return;
+                }
                 log.info("Idle timeout for session {}", sessionId);
                 try {
                     stateMachine.transition(StateMachine.Trigger.IDLE_TIMEOUT, sessionId);
@@ -156,7 +185,9 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             case "mcphub.control.arm"              -> handleArm();
             case "mcphub.control.open"             -> handleOpen();
             case "mcphub.control.close"            -> handleClose();
-            case "mcphub.control.bridge_detach"    -> handleBridgeDetach();
+            case "mcphub.control.bridge_attach"-> handleBridgeAttach(params);
+            case "mcphub.control.bridge_ping"  -> handleBridgePing(params);
+            case "mcphub.control.bridge_detach"-> handleBridgeDetach(params);
             case "mcphub.control.lock"             -> handleLock(params);
             case "mcphub.control.unlock"           -> handleUnlock();
             case "mcphub.control.health"           -> handleHealth();
@@ -365,31 +396,60 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
         return r;
     }
 
-    /** mcphub.control.bridge_detach — decrement bridge count; close session when last bridge leaves. */
-    private JsonNode handleBridgeDetach() {
-        int count = activeBridgeCount.updateAndGet(c -> c > 0 ? c - 1 : 0);
-        log.info("Bridge detached. Active bridges: {}", count);
-        if (count == 0) {
-            String sessionId = sessionManager.getCurrentSessionId();
-            StateMachine.State current = stateMachine.getState();
-            try {
-                if (current == StateMachine.State.ARMED) {
-                    stateMachine.transition(StateMachine.Trigger.CLOSE, sessionId);
-                    sessionManager.endSession();
-                } else if (current == StateMachine.State.OPEN) {
-                    stateMachine.transition(StateMachine.Trigger.CLOSE, sessionId);
-                    doCoolingDownAndClose(sessionId, "bridge_detach");
-                }
-            } catch (StateMachine.TransitionException e) {
-                log.warn("Bridge-triggered close transition failed: {}", e.getMessage());
+    /** mcphub.control.bridge_attach — increment bridge count; suspend idle timer on first attach. */
+    private JsonNode handleBridgeAttach(JsonNode params) {
+        long pid = params != null && params.has("pid") ? params.get("pid").asLong(-1) : -1;
+        // Deduplicate: same PID re-attaching is idempotent
+        boolean isNew = pid >= 0 && bridgePids.add(pid);
+        if (isNew) {
+            int count = activeBridgeCount.incrementAndGet();
+            bridgeLastPing.put(pid, Instant.now());
+            if (count == 1) {
+                sessionManager.suspendIdleTimer();
             }
-            ObjectNode r = mapper.createObjectNode();
-            r.put("state", stateMachine.getState().name());
-            r.put("mcphub_providers", "stop");
-            return r;
+            log.info("Bridge attached (pid={}). Active bridges: {}", pid, count);
+        } else if (pid >= 0) {
+            // Re-attach from same PID: update ping timestamp only
+            bridgeLastPing.put(pid, Instant.now());
+            log.debug("Bridge re-attached (pid={}, idempotent). Active bridges: {}", pid, activeBridgeCount.get());
         }
         ObjectNode r = mapper.createObjectNode();
         r.put("status", "ok");
+        r.put("active_bridges", activeBridgeCount.get());
+        return r;
+    }
+
+    /** mcphub.control.bridge_ping — update last-ping timestamp for a known bridge. */
+    private JsonNode handleBridgePing(JsonNode params) {
+        long pid = params != null && params.has("pid") ? params.get("pid").asLong(-1) : -1;
+        if (pid >= 0 && bridgePids.contains(pid)) {
+            bridgeLastPing.put(pid, Instant.now());
+        }
+        ObjectNode r = mapper.createObjectNode();
+        r.put("status", "ok");
+        return r;
+    }
+
+    /** mcphub.control.bridge_detach — decrement bridge count; resume idle timer when last bridge leaves. */
+    private JsonNode handleBridgeDetach(JsonNode params) {
+        long pid = params != null && params.has("pid") ? params.get("pid").asLong(-1) : -1;
+        // Only decrement if this PID was a known attached bridge
+        boolean wasKnown = pid >= 0 && bridgePids.remove(pid);
+        if (wasKnown) {
+            bridgeLastPing.remove(pid);
+            int count = activeBridgeCount.updateAndGet(c -> c > 0 ? c - 1 : 0);
+            log.info("Bridge detached (pid={}). Active bridges: {}", pid, count);
+            if (count == 0) {
+                sessionManager.resumeIdleTimer();
+                bridgePids.clear();
+                bridgeLastPing.clear();
+            }
+        } else {
+            log.debug("Bridge detach for unknown pid={}, ignoring", pid);
+        }
+        ObjectNode r = mapper.createObjectNode();
+        r.put("status", "ok");
+        r.put("active_bridges", activeBridgeCount.get());
         return r;
     }
 
@@ -442,6 +502,33 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             sessionManager.endSession();
         } catch (StateMachine.TransitionException e) {
             log.warn("CoolingDown→Closed transition failed: {}", e.getMessage());
+        }
+    }
+
+    /** Janitor: detect crashed bridges and clean up counts. */
+    private void janitorTask() {
+        try {
+            Instant now = Instant.now();
+            for (Long pid : new ArrayList<>(bridgePids)) {
+                Instant lastPing = bridgeLastPing.get(pid);
+                if (lastPing == null) {
+                    lastPing = Instant.now();
+                }
+                if (now.getEpochSecond() - lastPing.getEpochSecond() > 180) {
+                    boolean alive = ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
+                    if (!alive) {
+                        log.warn("Bridge pid {} appears dead, removing", pid);
+                        bridgePids.remove(pid);
+                        bridgeLastPing.remove(pid);
+                        int count = activeBridgeCount.updateAndGet(c -> c > 0 ? c - 1 : 0);
+                        if (count == 0) {
+                            sessionManager.resumeIdleTimer();
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Bridge janitor task failed: {}", e.getMessage());
         }
     }
 }
