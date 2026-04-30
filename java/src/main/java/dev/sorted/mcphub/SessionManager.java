@@ -38,6 +38,7 @@ public class SessionManager {
     private TimeoutCallback timeoutCallback;
     private ScheduledFuture<?> idleTimerFuture;
     private ScheduledFuture<?> armTimerFuture;
+    private volatile boolean idleSuspended;
 
     public SessionManager() {
         this(DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_ARM_TIMEOUT_SECONDS);
@@ -62,6 +63,7 @@ public class SessionManager {
         currentSessionId = UUID.randomUUID().toString();
         sessionStart = Instant.now();
         lastActivity = sessionStart;
+        idleSuspended = false;
         log.info("Session started: {}", currentSessionId);
         startArmTimer();
         return currentSessionId;
@@ -79,6 +81,19 @@ public class SessionManager {
         resetIdleTimer();
     }
 
+    /** Suspend idle timer while a bridge is attached. */
+    public synchronized void suspendIdleTimer() {
+        cancelIdleTimer();
+        idleSuspended = true;
+    }
+
+    /** Resume idle timer after last bridge detaches. */
+    public synchronized void resumeIdleTimer() {
+        idleSuspended = false;
+        lastActivity = Instant.now();
+        resetIdleTimer();
+    }
+
     /** Increment in-flight call count. */
     public int incrementInFlight() { return inFlightCount.incrementAndGet(); }
 
@@ -92,6 +107,7 @@ public class SessionManager {
     public void endSession() {
         cancelIdleTimer();
         cancelArmTimer();
+        idleSuspended = false;
         String sid = currentSessionId;
         currentSessionId = null;
         sessionStart = null;
@@ -127,7 +143,10 @@ public class SessionManager {
         if (armTimerFuture != null) { armTimerFuture.cancel(false); armTimerFuture = null; }
     }
 
-    private void resetIdleTimer() {
+    private synchronized void resetIdleTimer() {
+        if (idleSuspended) {
+            return;
+        }
         cancelIdleTimer();
         idleTimerFuture = scheduler.schedule(() -> {
             String sid = currentSessionId;
@@ -138,7 +157,7 @@ public class SessionManager {
         }, idleTimeoutSeconds, TimeUnit.SECONDS);
     }
 
-    private void cancelIdleTimer() {
+    private synchronized void cancelIdleTimer() {
         if (idleTimerFuture != null) { idleTimerFuture.cancel(false); idleTimerFuture = null; }
     }
 }

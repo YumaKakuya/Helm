@@ -37,6 +37,7 @@ class ControlHandlerTest {
 
     @AfterEach
     void tearDown() {
+        if (handler != null) handler.shutdown();
         session.shutdown();
         if (db != null) db.close();
     }
@@ -347,6 +348,119 @@ class ControlHandlerTest {
         assertEquals(PolicyEngine.Decision.DENY, result.decision(),
                 "Global deny at priority 1000 must override session allow at priority -1");
         assertEquals("global-deny-webfetch", result.matchedRuleId());
+    }
+
+    // -------------------------------------------------------------------------
+    // Bridge attach/detach idle timeout suppression
+    // -------------------------------------------------------------------------
+
+    @Test
+    void bridgeAttach_incrementsCount() throws Exception {
+        JsonNode result = handler.handle("mcphub.control.bridge_attach",
+            mapper.readTree("{\"pid\":12345}"));
+        assertEquals("ok", result.get("status").asText());
+        assertEquals(1, result.get("active_bridges").asInt());
+
+        result = handler.handle("mcphub.control.bridge_attach",
+            mapper.readTree("{\"pid\":12346}"));
+        assertEquals(2, result.get("active_bridges").asInt());
+    }
+
+    @Test
+    void bridgeAttach_cancelsIdleTimer() throws Exception {
+        StateMachine freshSm = new StateMachine();
+        freshSm.transition(StateMachine.Trigger.ARM, "s1");
+        freshSm.transition(StateMachine.Trigger.OPEN, "s1");
+
+        SessionManager shortSession = new SessionManager(1, 300);
+        shortSession.startSession();
+        shortSession.onOpen();
+
+        ControlHandler ch = new ControlHandler(freshSm, shortSession, db);
+        ch.handle("mcphub.control.bridge_attach", mapper.readTree("{\"pid\":12345}"));
+
+        Thread.sleep(3000);
+        assertEquals(StateMachine.State.OPEN, freshSm.getState(),
+            "Session should remain OPEN while bridge is attached");
+        assertNotNull(shortSession.getCurrentSessionId());
+
+        ch.shutdown();
+        shortSession.shutdown();
+    }
+
+    @Test
+    void bridgeDetach_lastBridge_restartsIdleTimer() throws Exception {
+        StateMachine freshSm = new StateMachine();
+        freshSm.transition(StateMachine.Trigger.ARM, "s1");
+        freshSm.transition(StateMachine.Trigger.OPEN, "s1");
+
+        SessionManager shortSession = new SessionManager(1, 300);
+        shortSession.startSession();
+        shortSession.onOpen();
+
+        ControlHandler ch = new ControlHandler(freshSm, shortSession, db);
+        ch.handle("mcphub.control.bridge_attach", mapper.readTree("{\"pid\":12345}"));
+
+        JsonNode result = ch.handle("mcphub.control.bridge_detach", mapper.readTree("{\"pid\":12345}"));
+        assertEquals("ok", result.get("status").asText());
+        assertEquals(0, result.get("active_bridges").asInt());
+
+        assertEquals(StateMachine.State.OPEN, freshSm.getState(),
+            "Session should not close immediately after last bridge detaches");
+
+        Thread.sleep(3000);
+        assertEquals(StateMachine.State.CLOSED, freshSm.getState(),
+            "Session should close after resumed idle timer fires");
+        assertNull(shortSession.getCurrentSessionId());
+
+        ch.shutdown();
+        shortSession.shutdown();
+    }
+
+    @Test
+    void bridgeDetach_notLastBridge_keepsIdleSuppressed() throws Exception {
+        StateMachine freshSm = new StateMachine();
+        freshSm.transition(StateMachine.Trigger.ARM, "s1");
+        freshSm.transition(StateMachine.Trigger.OPEN, "s1");
+
+        SessionManager shortSession = new SessionManager(1, 300);
+        shortSession.startSession();
+        shortSession.onOpen();
+
+        ControlHandler ch = new ControlHandler(freshSm, shortSession, db);
+        ch.handle("mcphub.control.bridge_attach", mapper.readTree("{\"pid\":12345}"));
+        ch.handle("mcphub.control.bridge_attach", mapper.readTree("{\"pid\":12346}"));
+        ch.handle("mcphub.control.bridge_detach", mapper.readTree("{\"pid\":12345}"));
+
+        Thread.sleep(3000);
+        assertEquals(StateMachine.State.OPEN, freshSm.getState(),
+            "Session should remain OPEN when one bridge detaches but another remains");
+        assertNotNull(shortSession.getCurrentSessionId());
+
+        ch.shutdown();
+        shortSession.shutdown();
+    }
+
+    @Test
+    void idleTimeout_doesNotFire_whileBridgeAttached() throws Exception {
+        StateMachine freshSm = new StateMachine();
+        freshSm.transition(StateMachine.Trigger.ARM, "s1");
+        freshSm.transition(StateMachine.Trigger.OPEN, "s1");
+
+        SessionManager shortSession = new SessionManager(1, 300);
+        shortSession.startSession();
+        shortSession.onOpen();
+
+        ControlHandler ch = new ControlHandler(freshSm, shortSession, db);
+        ch.handle("mcphub.control.bridge_attach", mapper.readTree("{\"pid\":12345}"));
+
+        Thread.sleep(3000);
+        assertEquals(StateMachine.State.OPEN, freshSm.getState(),
+            "Session should remain OPEN while bridge is attached");
+        assertNotNull(shortSession.getCurrentSessionId());
+
+        ch.shutdown();
+        shortSession.shutdown();
     }
 
     private ControlHandler createCapabilityAwareHandler() throws Exception {
