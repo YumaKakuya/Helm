@@ -45,7 +45,7 @@ Core capabilities:
 
 - **Single MCP endpoint** aggregating multiple tool providers
 - **Classifier-invisible path** for tools (avoids Anthropic API body-size limits)
-- **Session lifecycle** (Closed / Armed / Open / CoolingDown) with auto-close
+- **Session lifecycle** (Closed / Armed / Open / CoolingDown) with idle timeout (suppressed while a bridge is connected)
 - **Allow/deny policy** per tool, with session-scoped rule injection
 - **Structured failure responses** with error codes, recovery guidance, and fallback suggestions
 - **Route logging** for observability, with intent annotation support
@@ -195,6 +195,12 @@ mcphub.control.add_session_rule   Add a session-scoped allow/deny/hide rule
 ```
 
 Session rules are automatically purged when the session closes.
+
+### Bridge Lifecycle
+
+When an AI agent connects via `helm bridge`, the bridge automatically registers with the daemon (`bridge_attach`). While at least one bridge is connected, the session idle timeout (default 300s) is suspended — tools remain visible for the entire agent session.
+
+When the last bridge disconnects, a 300s grace period begins. If no bridge reconnects within that window, the session closes and providers are stopped. A 60s heartbeat detects crashed bridges that failed to send a clean disconnect.
 
 ## Project Status
 
