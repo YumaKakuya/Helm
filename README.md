@@ -131,11 +131,7 @@ chmod 600 ~/.config/mcphub/brave-api-key
 
 | Item | Status |
 |------|--------|
-| Task-context filtering | Planned |
-| Result caching | Planned |
-| Dry-run mode | Planned |
 | Management UI | Not started |
-| Full LSP support | Alpha stub |
 
 ## Hosted Tools
 
@@ -143,8 +139,16 @@ chmod 600 ~/.config/mcphub/brave-api-key
 |---------|-------|------|
 | web | `webfetch`, `websearch` | builtin |
 | edit | `apply_patch` | builtin |
-| project | `todowrite`, `list`, `codesearch`, `lsp` | builtin |
+| project | `todowrite`, `list`, `codesearch`, `lsp`, `task_create`, `task_list`, `task_update`, `task_delete`, `mcphub_checkpoint` | builtin |
 | session | `plan_enter`, `plan_exit`, `skill`, `batch` | builtin |
+
+### Task Management Tools
+
+Persistent cross-session task tracking with `task_create`, `task_list`, `task_update`, `task_delete`. Tasks survive `/clear` and daemon restarts — stored as JSON at `~/.config/mcphub/tasks.json`. `task_update status=done` functions as 消込 (completion marking).
+
+### Checkpoint
+
+`mcphub_checkpoint` snapshots the current session state — active tasks, nexus issues, and a handover message — to `~/.config/mcphub/checkpoints/` for seamless next-session recovery.
 
 ## Relay Providers
 

@@ -68,9 +68,15 @@ interface Task {
 function loadTasks(): Task[] {
   try {
     if (fs.existsSync(TASKS_FILE)) {
-      return JSON.parse(fs.readFileSync(TASKS_FILE, 'utf-8'));
+      const data = JSON.parse(fs.readFileSync(TASKS_FILE, 'utf-8'));
+      if (!Array.isArray(data)) throw new Error('tasks.json is not an array');
+      return data;
     }
-  } catch { /* corrupted file, start fresh */ }
+  } catch (e) {
+    const backup = TASKS_FILE + '.corrupted.' + Date.now();
+    try { fs.renameSync(TASKS_FILE, backup); } catch { /* ignore rename failure */ }
+    throw new Error(`tasks.json corrupted (backed up to ${backup}): ${e instanceof Error ? e.message : String(e)}`);
+  }
   return [];
 }
 
@@ -130,12 +136,16 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<{ 
   }
   if (name === 'task_create') {
     const tasks = loadTasks();
+    const title = (args['title'] as string)?.trim();
+    if (!title) throw new Error('title is required');
+    const priority = (args['priority'] as string) || 'MEDIUM';
+    if (!['HIGH', 'MEDIUM', 'LOW'].includes(priority)) throw new Error(`Invalid priority: ${priority}`);
     const task: Task = {
       id: nextTaskId(tasks),
-      title: (args['title'] as string)?.trim() || 'Untitled',
+      title,
       description: (args['description'] as string)?.trim() || '',
       status: 'open',
-      priority: (args['priority'] as string) || 'MEDIUM',
+      priority,
       createdAt: now(),
       updatedAt: now(),
       notes: []
@@ -157,6 +167,7 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<{ 
     const tasks = loadTasks();
     const id = (args['id'] as string)?.trim();
     const status = (args['status'] as string)?.trim();
+    if (!['open', 'in_progress', 'done'].includes(status)) throw new Error(`Invalid status: ${status}`);
     const note = (args['note'] as string)?.trim();
     const idx = tasks.findIndex(t => t.id === id);
     if (idx === -1) throw new Error(`Task not found: ${id}`);
@@ -183,6 +194,7 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<{ 
     const activeTasks = tasks.filter(t => t.status !== 'done');
     const doneTasks = tasks.filter(t => t.status === 'done');
     let nexusIssues: { file: string; mtime: string }[] = [];
+    let nexusError: string | null = null;
     if (project) {
       const nexusDir = path.join(process.env['HOME'] || '/tmp', 'nexus', 'issue', project);
       try {
@@ -191,7 +203,9 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<{ 
             .filter(e => e.isFile() && e.name.endsWith('.md'))
             .map(e => ({ file: e.name, mtime: fs.statSync(path.join(nexusDir, e.name)).mtime.toISOString() }));
         }
-      } catch { /* no nexus dir yet */ }
+      } catch (e) {
+        nexusError = e instanceof Error ? e.message : String(e);
+      }
     }
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const checkpointDir = path.join(process.env['HOME'] || '/tmp', '.config', 'mcphub', 'checkpoints');
@@ -202,7 +216,7 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<{ 
       message,
       project: project || null,
       tasks: { active: activeTasks.length, done: doneTasks.length, activeTasks, doneTasks },
-      nexusIssues: project ? { project, open: nexusIssues.length, issues: nexusIssues } : null
+      nexusIssues: project ? { project, open: nexusIssues.length, issues: nexusIssues, ...(nexusError ? { error: nexusError } : {}) } : null
     };
     fs.writeFileSync(filePath, JSON.stringify(doc, null, 2), 'utf-8');
     return { content: [{ type: 'text', text: JSON.stringify({ checkpoint: filePath, active_tasks: activeTasks.length, done_tasks: doneTasks.length, nexus_open: nexusIssues.length }) }] };
