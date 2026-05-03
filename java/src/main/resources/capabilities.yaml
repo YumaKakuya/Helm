@@ -355,6 +355,93 @@ capabilities:
       side_effect_class: "local_state"
       timeout_hint_ms: 60000
 
+  - capability_id: "task_create"
+    display_name: "task_create"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        title: { type: string, description: "Task title" }
+        description: { type: string, description: "Task description or details" }
+        priority: { type: string, enum: [HIGH, MEDIUM, LOW], default: MEDIUM }
+      required: [title]
+    contract:
+      purpose: "Create a persistent task for cross-session tracking."
+      may_do: ["Write tasks to ~/.config/mcphub/tasks.json"]
+      must_not_do: ["Modify other files"]
+      when_to_call: ["A new actionable item is discovered that should survive /clear"]
+      when_not_to_call: ["Volatile in-session reminders; use todowrite"]
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+
+  - capability_id: "task_list"
+    display_name: "task_list"
+    provider_id: "builtin-hatch"
+    access_class: "safe"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        status: { type: string, enum: [open, in_progress, done, all], default: all }
+    contract:
+      purpose: "List persistent tasks with optional status filter."
+      may_do: ["Read ~/.config/mcphub/tasks.json"]
+      must_not_do: ["Modify any files"]
+      when_to_call: ["Session start: review remaining work from previous sessions"]
+      when_not_to_call: ["Creating or updating tasks"]
+      side_effect_class: "none"
+      timeout_hint_ms: 5000
+
+  - capability_id: "task_update"
+    display_name: "task_update"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        id: { type: string, description: "Task ID from task_list" }
+        status: { type: string, enum: [open, in_progress, done], description: "New status (done = 消込)" }
+        note: { type: string, description: "Optional note" }
+      required: [id, status]
+    contract:
+      purpose: "Update task status. done = 消込."
+      may_do: ["Modify tasks.json"]
+      must_not_do: ["Delete tasks (use task_delete)"]
+      when_to_call: ["Task completed — mark as done for 消込"]
+      when_not_to_call: ["Creating new tasks"]
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+
+  - capability_id: "task_delete"
+    display_name: "task_delete"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        id: { type: string, description: "Task ID from task_list" }
+      required: [id]
+    contract:
+      purpose: "Delete a task permanently."
+      may_do: ["Remove task from tasks.json"]
+      must_not_do: ["Delete non-task files"]
+      when_to_call: ["Task is no longer relevant"]
+      when_not_to_call: ["Task is done — use task_update status=done instead"]
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+
   # -----------------------------------------------------------------------
   # Relay providers: configure in ~/.config/mcphub/relays.yaml
   # See README.md for format and examples.
