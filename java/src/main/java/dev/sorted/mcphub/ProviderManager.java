@@ -272,9 +272,14 @@ public class ProviderManager {
             try {
                 return futureResult.get(CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             } catch (java.util.concurrent.TimeoutException e) {
+                restartBrokenProvider(groupId);
                 throw new IOException("Provider '" + groupId + "' call timed out after " + CALL_TIMEOUT_MS + "ms");
             } catch (java.util.concurrent.ExecutionException e) {
-                throw new IOException("Provider '" + groupId + "' call failed: " + e.getCause().getMessage());
+                String causeMsg = e.getCause() != null ? e.getCause().getMessage() : e.getMessage();
+                if (causeMsg != null && causeMsg.contains("closed stdout")) {
+                    restartBrokenProvider(groupId);
+                }
+                throw new IOException("Provider '" + groupId + "' call failed: " + causeMsg);
             }
         }
     }
@@ -288,6 +293,29 @@ public class ProviderManager {
     // -------------------------------------------------------------------------
     // Internal
     // -------------------------------------------------------------------------
+
+    /** Kill and restart a provider whose stdin/stdout sync may be broken
+     *  (e.g., after a call timeout or stdout close). */
+    private void restartBrokenProvider(String groupId) {
+        ProviderProcess broken = processes.remove(groupId);
+        if (broken != null) {
+            broken.process.destroy();
+            log.warn("Provider group '{}' call failed — destroying and restarting", groupId);
+            for (GroupConfig g : groups) {
+                if (g.id.equals(groupId)) {
+                    try {
+                        start(g);
+                        reportHealth(groupId, "running");
+                        confirmWithRegistry(g);
+                    } catch (Exception restartEx) {
+                        log.error("Failed to restart provider group '{}' after failure: {}", groupId, restartEx.getMessage());
+                        reportHealth(groupId, "unavailable");
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     private void start(GroupConfig cfg) throws IOException {
         // Prevent orphan processes: skip if group already has a running process

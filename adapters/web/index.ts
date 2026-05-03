@@ -95,19 +95,30 @@ function httpRequest(
         return;
       }
       let data = '';
+      let truncated = false;
       res.on('data', (chunk: Buffer) => {
+        if (truncated) return;
         data += chunk.toString();
-        // Truncate early to avoid memory issues
         if (data.length > MAX_BODY_CHARS * 2) {
+          truncated = true;
           res.destroy();
+          resolve({
+            statusCode: res.statusCode || 0,
+            headers: res.headers as Record<string, string | string[] | undefined>,
+            body: data.slice(0, MAX_BODY_CHARS * 2),
+            finalUrl: urlStr
+          });
         }
       });
-      res.on('end', () => resolve({
-        statusCode: res.statusCode || 0,
-        headers: res.headers as Record<string, string | string[] | undefined>,
-        body: data,
-        finalUrl: urlStr
-      }));
+      res.on('end', () => {
+        if (truncated) return;
+        resolve({
+          statusCode: res.statusCode || 0,
+          headers: res.headers as Record<string, string | string[] | undefined>,
+          body: data,
+          finalUrl: urlStr
+        });
+      });
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out (30s)')); });
