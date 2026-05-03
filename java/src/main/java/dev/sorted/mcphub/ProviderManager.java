@@ -87,7 +87,7 @@ public class ProviderManager {
             new GroupConfig("edit", "edit/index.js", null,
                     new String[]{"apply_patch"}, "builtin_hosted"),
             new GroupConfig("project", "project/index.js", null,
-                    new String[]{"todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete"}, "builtin_hosted"),
+                    new String[]{"todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete", "mcphub_checkpoint"}, "builtin_hosted"),
             new GroupConfig("session", "session/index.js", null,
                     new String[]{"plan_enter", "plan_exit", "skill", "batch"}, "builtin_hosted"),
             new GroupConfig("synthetic", "synthetic/index.js", null,

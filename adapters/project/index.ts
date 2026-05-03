@@ -43,6 +43,11 @@ const TOOLS = [
     name: 'task_delete',
     description: 'Delete a task permanently. Modifies local state.',
     inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Task ID from task_list' } }, required: ['id'] }
+  },
+  {
+    name: 'mcphub_checkpoint',
+    description: 'Save current session state (tasks, nexus issues, handover note) as a persistent checkpoint for next-session handoff. Modifies local state.',
+    inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Handover message — what was done, what remains, context for next session' }, project: { type: 'string', description: 'Project name for nexus issue listing (optional)' } }, required: ['message'] }
   }
 ];
 
@@ -169,6 +174,38 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<{ 
     if (remaining.length === before) throw new Error(`Task not found: ${id}`);
     saveTasks(remaining);
     return { content: [{ type: 'text', text: JSON.stringify({ deleted: id, remaining: remaining.length }) }] };
+  }
+  if (name === 'mcphub_checkpoint') {
+    const message = (args['message'] as string)?.trim();
+    if (!message) throw new Error('message is required');
+    const project = (args['project'] as string)?.trim();
+    const tasks = loadTasks();
+    const activeTasks = tasks.filter(t => t.status !== 'done');
+    const doneTasks = tasks.filter(t => t.status === 'done');
+    let nexusIssues: { file: string; mtime: string }[] = [];
+    if (project) {
+      const nexusDir = path.join(process.env['HOME'] || '/tmp', 'nexus', 'issue', project);
+      try {
+        if (fs.existsSync(nexusDir)) {
+          nexusIssues = fs.readdirSync(nexusDir, { withFileTypes: true })
+            .filter(e => e.isFile() && e.name.endsWith('.md'))
+            .map(e => ({ file: e.name, mtime: fs.statSync(path.join(nexusDir, e.name)).mtime.toISOString() }));
+        }
+      } catch { /* no nexus dir yet */ }
+    }
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const checkpointDir = path.join(process.env['HOME'] || '/tmp', '.config', 'mcphub', 'checkpoints');
+    if (!fs.existsSync(checkpointDir)) fs.mkdirSync(checkpointDir, { recursive: true });
+    const filePath = path.join(checkpointDir, `checkpoint-${timestamp}.json`);
+    const doc = {
+      timestamp: now(),
+      message,
+      project: project || null,
+      tasks: { active: activeTasks.length, done: doneTasks.length, activeTasks, doneTasks },
+      nexusIssues: project ? { project, open: nexusIssues.length, issues: nexusIssues } : null
+    };
+    fs.writeFileSync(filePath, JSON.stringify(doc, null, 2), 'utf-8');
+    return { content: [{ type: 'text', text: JSON.stringify({ checkpoint: filePath, active_tasks: activeTasks.length, done_tasks: doneTasks.length, nexus_open: nexusIssues.length }) }] };
   }
   throw new Error(`Unknown tool: ${name}`);
 }

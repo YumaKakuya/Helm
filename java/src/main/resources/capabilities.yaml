@@ -442,6 +442,28 @@ capabilities:
       side_effect_class: "local_state"
       timeout_hint_ms: 5000
 
+  - capability_id: "mcphub_checkpoint"
+    display_name: "mcphub_checkpoint"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        message: { type: string, description: "Handover note for next session" }
+        project: { type: string, description: "Project name for nexus issue listing (optional)" }
+      required: [message]
+    contract:
+      purpose: "Save session state as a checkpoint for cross-session handoff."
+      may_do: ["Read tasks.json and nexus/issue/", "Write checkpoint to ~/.config/mcphub/checkpoints/"]
+      must_not_do: ["Delete or modify task/issue data"]
+      when_to_call: ["Before /clear at session end"]
+      when_not_to_call: ["Mid-session status checks"]
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+
   # -----------------------------------------------------------------------
   # Relay providers: configure in ~/.config/mcphub/relays.yaml
   # See README.md for format and examples.

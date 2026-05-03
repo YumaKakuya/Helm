@@ -84,13 +84,13 @@ class McpHandlerTest {
         sm.transition(StateMachine.Trigger.OPEN, "s1");
         confirmGroup("web", "webfetch", "websearch");
         confirmGroup("edit", "apply_patch");
-        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete", "mcphub_checkpoint");
         confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
 
         JsonNode r = handler.handle("tools/list", null);
         JsonNode tools = r.path("tools");
-        // 15 registered tools (builtin-hosted + task) + 1 disambiguation = 16
-        assertEquals(16, tools.size(), "Expected 15 capabilities + 1 disambiguation tool");
+        // 16 registered tools (builtin-hosted + task + checkpoint) + 1 disambiguation = 17
+        assertEquals(17, tools.size(), "Expected 16 capabilities + 1 disambiguation tool");
 
         // Verify disambiguation tool is present
         boolean hasDisambig = false;
@@ -118,7 +118,7 @@ class McpHandlerTest {
         sm.transition(StateMachine.Trigger.OPEN, "s1");
         confirmGroup("web", "webfetch", "websearch");
         confirmGroup("edit", "apply_patch");
-        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete", "mcphub_checkpoint");
         confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
 
         JsonNode r = handler.handle("tools/list", null);
@@ -149,7 +149,7 @@ class McpHandlerTest {
         sm.transition(StateMachine.Trigger.OPEN, "s1");
         confirmGroup("web", "webfetch", "websearch");
         confirmGroup("edit", "apply_patch");
-        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete", "mcphub_checkpoint");
         confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
 
         ObjectNode params = mapper.createObjectNode();
@@ -220,7 +220,7 @@ class McpHandlerTest {
         sm.transition(StateMachine.Trigger.OPEN, "s1");
         confirmGroup("web", "webfetch", "websearch");
         confirmGroup("edit", "apply_patch");
-        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete", "mcphub_checkpoint");
         confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
 
         ObjectNode params = mapper.createObjectNode();
