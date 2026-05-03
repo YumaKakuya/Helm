@@ -29,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 public class StdioBridge {
     private static final Logger log = LoggerFactory.getLogger(StdioBridge.class);
     private static final ObjectMapper mapper = new ObjectMapper();
+    private volatile boolean attached = false;
 
     /**
      * Run the bridge loop. Blocks until stdin is closed.
@@ -39,6 +40,11 @@ public class StdioBridge {
                 new OutputStreamWriter(System.out, StandardCharsets.UTF_8), true);
 
         log.info("mcphub bridge started");
+
+        // Start heartbeat thread (best-effort 60s ping)
+        Thread heartbeat = new Thread(this::heartbeatLoop, "mcphub-bridge-heartbeat");
+        heartbeat.setDaemon(true);
+        heartbeat.start();
 
         String line;
         while ((line = stdinReader.readLine()) != null) {
@@ -64,7 +70,17 @@ public class StdioBridge {
                 writeError(stdoutWriter, id, -32000,
                         "MCPHUB daemon is not running. Start it with 'mcphub start'.");
             }
+
+            // Send bridge_attach on first successful initialize
+            if (!attached) {
+                JsonNode methodNode = req.get("method");
+                if (methodNode != null && "initialize".equals(methodNode.asText())) {
+                    attached = sendAttach();
+                }
+            }
         }
+
+        heartbeat.interrupt();
 
         // REQ-2.3.5: stdin closed → bridge detaching (session stays open)
         log.info("stdin closed, bridge detaching");
@@ -102,13 +118,67 @@ public class StdioBridge {
         }
     }
 
+    /** Send bridge_attach notification to daemon. Returns true on success. */
+    private boolean sendAttach() {
+        ObjectNode req = mapper.createObjectNode();
+        req.put("jsonrpc", "2.0");
+        req.put("method", "mcphub.control.bridge_attach");
+        ObjectNode params = mapper.createObjectNode();
+        params.put("pid", ProcessHandle.current().pid());
+        req.set("params", params);
+        try {
+            String response = forwardToDaemon(mapper.writeValueAsString(req));
+            if (response == null) {
+                log.warn("bridge_attach failed: daemon unreachable");
+                return false;
+            }
+            log.info("Bridge attached to daemon");
+            return true;
+        } catch (Exception e) {
+            log.warn("bridge_attach failed: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** Send periodic bridge_ping to daemon (best-effort). */
+    private void sendPing() {
+        ObjectNode req = mapper.createObjectNode();
+        req.put("jsonrpc", "2.0");
+        req.put("method", "mcphub.control.bridge_ping");
+        ObjectNode params = mapper.createObjectNode();
+        params.put("pid", ProcessHandle.current().pid());
+        req.set("params", params);
+        try {
+            String response = forwardToDaemon(mapper.writeValueAsString(req));
+            if (response == null) {
+                log.warn("bridge_ping notification failed: daemon unreachable");
+            }
+        } catch (Exception e) {
+            log.warn("bridge_ping notification failed: {}", e.getMessage());
+        }
+    }
+
+    private void heartbeatLoop() {
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                Thread.sleep(60000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            sendPing();
+        }
+    }
+
     /** Send session-detach notification to daemon (best-effort). */
     private void sendDetach() {
         // Notify daemon so it can track last-bridge-exit and auto-close.
         ObjectNode req = mapper.createObjectNode();
         req.put("jsonrpc", "2.0");
         req.put("method", "mcphub.control.bridge_detach");
-        req.set("params", mapper.createObjectNode());
+        ObjectNode params = mapper.createObjectNode();
+        params.put("pid", ProcessHandle.current().pid());
+        req.set("params", params);
         try {
             String response = forwardToDaemon(mapper.writeValueAsString(req));
             if (response == null) {

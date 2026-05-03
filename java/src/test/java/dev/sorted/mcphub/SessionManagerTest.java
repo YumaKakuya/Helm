@@ -66,4 +66,97 @@ class SessionManagerTest {
         assertTrue(fired.get());
         sm.shutdown();
     }
+
+    @Test
+    void idleTimerFires() throws InterruptedException {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicBoolean fired = new AtomicBoolean(false);
+
+        SessionManager sm = new SessionManager(1, 300); // 1s idle timeout
+        sm.setTimeoutCallback(new SessionManager.TimeoutCallback() {
+            public void onIdleTimeout(String sid) {
+                fired.set(true);
+                latch.countDown();
+            }
+            public void onArmTimeout(String sid) {}
+        });
+        sm.startSession();
+        sm.onOpen();
+        boolean triggered = latch.await(3, TimeUnit.SECONDS);
+        assertTrue(triggered, "Idle timeout should fire within 3 seconds");
+        assertTrue(fired.get());
+        sm.shutdown();
+    }
+
+    @Test
+    void idleTimerSuspendDoesNotFire() throws InterruptedException {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicBoolean fired = new AtomicBoolean(false);
+
+        SessionManager sm = new SessionManager(1, 300); // 1s idle timeout
+        sm.setTimeoutCallback(new SessionManager.TimeoutCallback() {
+            public void onIdleTimeout(String sid) {
+                fired.set(true);
+                latch.countDown();
+            }
+            public void onArmTimeout(String sid) {}
+        });
+        sm.startSession();
+        sm.onOpen();
+        sm.suspendIdleTimer();
+        boolean triggered = latch.await(3, TimeUnit.SECONDS);
+        assertFalse(triggered, "Idle timeout should NOT fire while suspended");
+        assertFalse(fired.get());
+        sm.shutdown();
+    }
+
+    @Test
+    void idleTimerResumeReFires() throws InterruptedException {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicBoolean fired = new AtomicBoolean(false);
+
+        SessionManager sm = new SessionManager(1, 300); // 1s idle timeout
+        sm.setTimeoutCallback(new SessionManager.TimeoutCallback() {
+            public void onIdleTimeout(String sid) {
+                fired.set(true);
+                latch.countDown();
+            }
+            public void onArmTimeout(String sid) {}
+        });
+        sm.startSession();
+        sm.onOpen();
+        sm.suspendIdleTimer();
+        Thread.sleep(500);
+        sm.resumeIdleTimer();
+        boolean triggered = latch.await(3, TimeUnit.SECONDS);
+        assertTrue(triggered, "Idle timeout should fire after resume");
+        assertTrue(fired.get());
+        sm.shutdown();
+    }
+
+    @Test
+    void flagClearedAcrossSessions() throws InterruptedException {
+        SessionManager sm = new SessionManager(1, 300);
+        sm.startSession();
+        sm.onOpen();
+        sm.suspendIdleTimer();
+        sm.endSession();
+
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicBoolean fired = new AtomicBoolean(false);
+        sm.setTimeoutCallback(new SessionManager.TimeoutCallback() {
+            public void onIdleTimeout(String sid) {
+                fired.set(true);
+                latch.countDown();
+            }
+            public void onArmTimeout(String sid) {}
+        });
+
+        sm.startSession();
+        sm.onOpen();
+        boolean triggered = latch.await(3, TimeUnit.SECONDS);
+        assertTrue(triggered, "Idle timeout should fire after new session start");
+        assertTrue(fired.get());
+        sm.shutdown();
+    }
 }
