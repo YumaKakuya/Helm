@@ -56,4 +56,4 @@ credentials*
 *.sqlite3
 
 # Logs
-*.log
+*.loghelm
