@@ -23,10 +23,70 @@ const TOOLS = [
     name: 'lsp',
     description: 'Query Language Server Protocol information (go-to-definition, hover, references). Read-only.',
     inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'LSP command (definition, references, hover)' }, file: { type: 'string', description: 'File path' }, line: { type: 'number', description: 'Line number (1-indexed)' }, character: { type: 'number', description: 'Character offset' } }, required: ['command', 'file'] }
+  },
+  {
+    name: 'task_create',
+    description: 'Create a persistent task for cross-session tracking. Modifies local state.',
+    inputSchema: { type: 'object', properties: { title: { type: 'string', description: 'Task title' }, description: { type: 'string', description: 'Task description or details' }, priority: { type: 'string', enum: ['HIGH', 'MEDIUM', 'LOW'], default: 'MEDIUM' } }, required: ['title'] }
+  },
+  {
+    name: 'task_list',
+    description: 'List persistent tasks with optional status filter. Read-only.',
+    inputSchema: { type: 'object', properties: { status: { type: 'string', enum: ['open', 'in_progress', 'done', 'all'], default: 'all', description: 'Filter by status' } }, required: [] }
+  },
+  {
+    name: 'task_update',
+    description: 'Update task status (e.g. mark as done for 消込) with optional note. Modifies local state.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Task ID from task_list' }, status: { type: 'string', enum: ['open', 'in_progress', 'done'], description: 'New status' }, note: { type: 'string', description: 'Optional note to record with this update' } }, required: ['id', 'status'] }
+  },
+  {
+    name: 'task_delete',
+    description: 'Delete a task permanently. Modifies local state.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'Task ID from task_list' } }, required: ['id'] }
   }
 ];
 
 const TODO_FILE = process.env['MCPHUB_TODO_FILE'] || path.join(process.env['HOME'] || '/tmp', '.mcphub_todos.json');
+const TASKS_FILE = path.join(process.env['HOME'] || '/tmp', '.config', 'mcphub', 'tasks.json');
+
+interface Task {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  priority: string;
+  createdAt: string;
+  updatedAt: string;
+  notes: string[];
+}
+
+function loadTasks(): Task[] {
+  try {
+    if (fs.existsSync(TASKS_FILE)) {
+      return JSON.parse(fs.readFileSync(TASKS_FILE, 'utf-8'));
+    }
+  } catch { /* corrupted file, start fresh */ }
+  return [];
+}
+
+function saveTasks(tasks: Task[]): void {
+  const dir = path.dirname(TASKS_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2), 'utf-8');
+}
+
+function nextTaskId(tasks: Task[]): string {
+  let max = 0;
+  for (const t of tasks) {
+    const m = t.id.match(/^task_(\d+)$/);
+    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+  }
+  return `task_${String(max + 1).padStart(3, '0')}`;
+}
+
+function now(): string {
+  return new Date().toISOString();
+}
 
 async function dispatch(name: string, args: Record<string, unknown>): Promise<{ content: { type: string; text: string }[]; isError?: boolean }> {
   if (name === 'todowrite') {
@@ -62,6 +122,53 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<{ 
     const command = args['command'] as string;
     const file = args['file'] as string;
     return { content: [{ type: 'text', text: `LSP ${command} for ${file}: LSP subprocess integration is alpha+ scope. Tool registered and callable; full language server protocol requires Session 4.` }] };
+  }
+  if (name === 'task_create') {
+    const tasks = loadTasks();
+    const task: Task = {
+      id: nextTaskId(tasks),
+      title: (args['title'] as string)?.trim() || 'Untitled',
+      description: (args['description'] as string)?.trim() || '',
+      status: 'open',
+      priority: (args['priority'] as string) || 'MEDIUM',
+      createdAt: now(),
+      updatedAt: now(),
+      notes: []
+    };
+    tasks.push(task);
+    saveTasks(tasks);
+    return { content: [{ type: 'text', text: JSON.stringify(task) }] };
+  }
+  if (name === 'task_list') {
+    const tasks = loadTasks();
+    const filter = (args['status'] as string) || 'all';
+    const filtered = filter === 'all' ? tasks : tasks.filter(t => t.status === filter);
+    const open = tasks.filter(t => t.status === 'open').length;
+    const progress = tasks.filter(t => t.status === 'in_progress').length;
+    const done = tasks.filter(t => t.status === 'done').length;
+    return { content: [{ type: 'text', text: JSON.stringify({ tasks: filtered, counts: { open, in_progress: progress, done, total: tasks.length }, filter }) }] };
+  }
+  if (name === 'task_update') {
+    const tasks = loadTasks();
+    const id = (args['id'] as string)?.trim();
+    const status = (args['status'] as string)?.trim();
+    const note = (args['note'] as string)?.trim();
+    const idx = tasks.findIndex(t => t.id === id);
+    if (idx === -1) throw new Error(`Task not found: ${id}`);
+    tasks[idx].status = status;
+    tasks[idx].updatedAt = now();
+    if (note) tasks[idx].notes.push(`[${now()}] ${note}`);
+    saveTasks(tasks);
+    return { content: [{ type: 'text', text: JSON.stringify(tasks[idx]) }] };
+  }
+  if (name === 'task_delete') {
+    const tasks = loadTasks();
+    const id = (args['id'] as string)?.trim();
+    const before = tasks.length;
+    const remaining = tasks.filter(t => t.id !== id);
+    if (remaining.length === before) throw new Error(`Task not found: ${id}`);
+    saveTasks(remaining);
+    return { content: [{ type: 'text', text: JSON.stringify({ deleted: id, remaining: remaining.length }) }] };
   }
   throw new Error(`Unknown tool: ${name}`);
 }
