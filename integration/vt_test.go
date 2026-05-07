@@ -730,3 +730,88 @@ func TestVT_020a_ArmedTimeoutAutoClose(t *testing.T) {
 		t.Errorf("VT-020a: expected CLOSED after armed timeout, got %s", state)
 	}
 }
+
+// TestSessionOpenRecoveryTool verifies the AI-facing recovery path for closed sessions.
+func TestSessionOpenRecoveryTool(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	repoRoot := findRepoRoot(t)
+	ensureJavaJar(t, repoRoot)
+	binPath := buildBinary(t, repoRoot)
+	sockPath, _, cleanup := startDaemon(t, binPath, repoRoot)
+	defer cleanup()
+
+	t.Run("closed_tools_list_shows_session_open_only", func(t *testing.T) {
+		result, rpcErr := call(t, sockPath, "tools/list", nil)
+		if rpcErr != nil {
+			t.Fatalf("tools/list RPC error: %d %s", rpcErr.Code, rpcErr.Message)
+		}
+		var listResult struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		}
+		if err := json.Unmarshal(result, &listResult); err != nil {
+			t.Fatalf("unmarshal tools/list: %v", err)
+		}
+		if len(listResult.Tools) != 1 {
+			t.Fatalf("expected 1 tool in CLOSED state, got %d", len(listResult.Tools))
+		}
+		if listResult.Tools[0].Name != "mcphub.session.open" {
+			t.Fatalf("expected mcphub.session.open, got %s", listResult.Tools[0].Name)
+		}
+	})
+
+	t.Run("closed_tool_call_returns_actionable_recovery", func(t *testing.T) {
+		params := map[string]interface{}{"name": "webfetch", "arguments": map[string]interface{}{"url": "https://example.com"}}
+		result, rpcErr := call(t, sockPath, "tools/call", params)
+		if rpcErr != nil {
+			t.Fatalf("tools/call RPC error: %d %s", rpcErr.Code, rpcErr.Message)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(result, &out); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if out["isError"] != true {
+			t.Fatalf("expected isError=true, got %v", out["isError"])
+		}
+		contentArr, ok := out["content"].([]interface{})
+		if !ok || len(contentArr) == 0 {
+			t.Fatalf("expected content array, got %v", out["content"])
+		}
+		textContent, ok := contentArr[0].(map[string]interface{})["text"].(string)
+		if !ok {
+			t.Fatalf("content[0].text not a string: %T", contentArr[0])
+		}
+		if !strings.Contains(textContent, "mcphub.session.open") {
+			t.Errorf("error must mention mcphub.session.open, got: %s", textContent)
+		}
+		if !strings.Contains(textContent, "call_mcphub_session_open") {
+			t.Errorf("error must include call_mcphub_session_open next_action, got: %s", textContent)
+		}
+	})
+
+	t.Run("session_open_recovers", func(t *testing.T) {
+		params := map[string]interface{}{"name": "mcphub.session.open", "arguments": map[string]interface{}{}}
+		result, rpcErr := call(t, sockPath, "tools/call", params)
+		if rpcErr != nil {
+			t.Fatalf("mcphub.session.open RPC error: %d %s", rpcErr.Code, rpcErr.Message)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(result, &out); err != nil {
+			t.Fatalf("unmarshal session.open result: %v", err)
+		}
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("mcphub.session.open should not return an error: %v", out)
+		}
+	})
+
+	time.Sleep(2 * time.Second)
+	if got := statusState(t, sockPath); got != "OPEN" {
+		t.Fatalf("expected OPEN after recovery, got %s", got)
+	}
+
+	closeSession(t, sockPath)
+}
