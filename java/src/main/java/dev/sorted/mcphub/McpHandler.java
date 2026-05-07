@@ -34,6 +34,7 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
     private static final Logger log = LoggerFactory.getLogger(McpHandler.class);
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final String DISAMBIGUATION_TOOL = "mcphub_disambiguate";
+    private static final String SESSION_OPEN_TOOL = "mcphub.session.open";
     private static final String SERVER_VERSION = "0.1.0-alpha";
 
     private final StateMachine stateMachine;
@@ -128,7 +129,12 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
 
         boolean isOpen = stateMachine.getState() == StateMachine.State.OPEN;
         if (!isOpen) {
-            // REQ-7.4.2: not Open → empty tool list
+            // Expose the recovery tool in the same AI-facing surface that reports session_not_open.
+            StateMachine.State current = stateMachine.getState();
+            if (!stateMachine.isLockedUntilUnlock()
+                    && (current == StateMachine.State.CLOSED || current == StateMachine.State.ARMED)) {
+                tools.add(buildSessionOpenTool());
+            }
             r.set("tools", tools);
             return r;
         }
@@ -202,6 +208,62 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         return tool;
     }
 
+    /** Build the MCP-visible session recovery tool. */
+    private ObjectNode buildSessionOpenTool() {
+        ObjectNode tool = mapper.createObjectNode();
+        tool.put("name", SESSION_OPEN_TOOL);
+        tool.put("description", "Open the MCPHUB session so tools become available. Call this when session is CLOSED or ARMED.");
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        schema.set("properties", mapper.createObjectNode());
+        tool.set("inputSchema", schema);
+        return tool;
+    }
+
+    /** Handle mcphub.session.open from tools/call so recovery is executable by AI clients. */
+    private JsonNode handleSessionOpen(long startMs, int requestSizeBytes, String intentAnnotation) {
+        try {
+            StateMachine.State current = stateMachine.getState();
+            String sessionId = sessionManager != null ? sessionManager.getCurrentSessionId() : null;
+
+            if (current == StateMachine.State.OPEN) {
+                logRoute(sessionId, SESSION_OPEN_TOOL, "mcphub-internal", "builtin_hosted",
+                        "allowed", null, System.currentTimeMillis() - startMs,
+                        requestSizeBytes, 0, intentAnnotation, null);
+                ObjectNode resp = mapper.createObjectNode();
+                resp.set("content", wrapTextContent("{\"state\":\"OPEN\",\"message\":\"Session already open.\"}"));
+                return resp;
+            }
+
+            if (current == StateMachine.State.CLOSED) {
+                sessionId = sessionManager != null ? sessionManager.startSession() : "mcp-session";
+                stateMachine.transition(StateMachine.Trigger.ARM, sessionId);
+            } else if (current == StateMachine.State.ARMED) {
+                sessionId = sessionManager != null ? sessionManager.getCurrentSessionId() : "mcp-session";
+            } else {
+                return failureResponse("session_not_open",
+                        "Cannot open session in state: " + current.name() + ". Wait and retry.",
+                        "wait_session", null, null);
+            }
+
+            stateMachine.transition(StateMachine.Trigger.OPEN, sessionId);
+            if (sessionManager != null) sessionManager.onOpen();
+
+            logRoute(sessionId, SESSION_OPEN_TOOL, "mcphub-internal", "builtin_hosted",
+                    "allowed", null, System.currentTimeMillis() - startMs,
+                    requestSizeBytes, 0, intentAnnotation, null);
+
+            ObjectNode resp = mapper.createObjectNode();
+            resp.put("mcphub_providers", "start");
+            resp.set("content", wrapTextContent("{\"state\":\"OPEN\",\"session_id\":\"" + sessionId + "\",\"message\":\"Session opened. All tools are now available.\"}"));
+            return resp;
+        } catch (StateMachine.TransitionException e) {
+            return failureResponse("session_not_open",
+                    "Failed to open session: " + e.getMessage(),
+                    "retry", null, null);
+        }
+    }
+
     /** Build the disambiguation MCP tool entry. REQ-5.3.1 */
     private ObjectNode buildDisambiguationTool() {
         ObjectNode tool = mapper.createObjectNode();
@@ -269,6 +331,11 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
             return resp;
         }
 
+        // --- MCP-visible session recovery tool bypasses the state guard ---
+        if (SESSION_OPEN_TOOL.equals(toolName)) {
+            return handleSessionOpen(startMs, requestSizeBytes, intentAnnotation);
+        }
+
         // --- State guard (REQ-2.4.5, REQ-5.6.2 session_not_open) ---
         if (stateMachine.getState() != StateMachine.State.OPEN) {
             long latency = System.currentTimeMillis() - startMs;
@@ -276,8 +343,8 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
                     "error", null, latency, requestSizeBytes, null, intentAnnotation,
                     "session_not_open");
             return failureResponse("session_not_open",
-                    "Session is not Open. Call mcphub.control.open first.",
-                    "wait_session", null, null);
+                    "Session is not Open. Call mcphub.session.open to reopen the session.",
+                    "call_mcphub_session_open", null, null);
         }
 
         // REQ-3.7.3: reset idle timer on every tools/call for the active session.

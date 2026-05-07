@@ -71,10 +71,11 @@ class McpHandlerTest {
     // --- tools/list ---
 
     @Test
-    void toolsList_whenClosed_returnsEmpty() throws Exception {
-        // Session is CLOSED — tools/list must return empty list (REQ-7.4.2)
+    void toolsList_whenClosed_returnsSessionOpenTool() throws Exception {
+        // Session is CLOSED — recovery must be visible in the same AI-facing surface.
         JsonNode r = handler.handle("tools/list", null);
-        assertEquals(0, r.path("tools").size());
+        assertEquals(1, r.path("tools").size());
+        assertEquals("mcphub.session.open", r.path("tools").get(0).path("name").asText());
     }
 
     @Test
@@ -140,7 +141,32 @@ class McpHandlerTest {
         assertTrue(r.path("isError").asBoolean(), "isError must be true");
         JsonNode err = parseErrorJson(r);
         assertEquals("session_not_open", err.path("error_code").asText());
-        assertEquals("wait_session", err.path("next_action").asText());
+        assertEquals("call_mcphub_session_open", err.path("next_action").asText());
+        assertTrue(err.path("reason").asText().contains("mcphub.session.open"));
+    }
+
+    @Test
+    void toolsCall_sessionOpenTool_opensSessionFromClosed() throws Exception {
+        ObjectNode params = mapper.createObjectNode();
+        params.put("name", "mcphub.session.open");
+        params.set("arguments", mapper.createObjectNode());
+
+        JsonNode r = handler.handle("tools/call", params);
+
+        assertFalse(r.path("isError").asBoolean(false), "session recovery should not be an error");
+        assertEquals(StateMachine.State.OPEN, sm.getState());
+        assertEquals("start", r.path("mcphub_providers").asText());
+
+        JsonNode listed = handler.handle("tools/list", null);
+        JsonNode tools = listed.path("tools");
+        boolean hasSessionOpen = false;
+        for (JsonNode t : tools) {
+            if ("mcphub.session.open".equals(t.path("name").asText())) {
+                hasSessionOpen = true;
+                break;
+            }
+        }
+        assertFalse(hasSessionOpen, "session recovery tool should not remain in the OPEN tool surface");
     }
 
     @Test
