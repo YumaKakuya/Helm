@@ -730,3 +730,128 @@ func TestVT_020a_ArmedTimeoutAutoClose(t *testing.T) {
 		t.Errorf("VT-020a: expected CLOSED after armed timeout, got %s", state)
 	}
 }
+
+// TestApplyPatch_Classifications verifies deterministic failure diagnostics for
+// apply_patch output. Covers: success with git-style headers, plain headers failure,
+// file-not-found, and hunk failures. No external services required.
+func TestApplyPatch_Classifications(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	repoRoot := findRepoRoot(t)
+	ensureJavaJar(t, repoRoot)
+	binPath := buildBinary(t, repoRoot)
+	sockPath, _, cleanup := startDaemon(t, binPath, repoRoot)
+	defer cleanup()
+
+	armAndOpen(t, sockPath)
+	defer closeSession(t, sockPath)
+
+	scratchDir := t.TempDir()
+
+	hunkFile := filepath.Join(scratchDir, "hunk_test.txt")
+	if err := os.WriteFile(hunkFile, []byte("line1\nline2\nline3\n"), 0644); err != nil {
+		t.Fatalf("write hunk_test.txt: %v", err)
+	}
+
+	type testCase struct {
+		name           string
+		patchContent   string
+		cwd            string
+		wantText       string
+		wantNextAction string
+		isError        bool
+	}
+
+	tests := []testCase{
+		{
+			name:           "success_git_style_headers",
+			patchContent:   "--- /dev/null\n+++ b/success_test.txt\n@@ -0,0 +1 @@\n+hello\n",
+			cwd:            scratchDir,
+			wantText:       "",
+			wantNextAction: "",
+			isError:        false,
+		},
+		{
+			name:           "plain_headers_detected",
+			patchContent:   "--- file.txt\n+++ file.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+			cwd:            scratchDir,
+			wantText:       "git-style",
+			wantNextAction: "abort",
+			isError:        true,
+		},
+		{
+			name:           "file_not_found",
+			patchContent:   "--- a/nonexistent.txt\n+++ b/nonexistent.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+			cwd:            scratchDir,
+			wantText:       "Cannot find file",
+			wantNextAction: "disambiguate",
+			isError:        true,
+		},
+		{
+			name:           "hunk_failure_stale_context",
+			patchContent:   "--- a/hunk_test.txt\n+++ b/hunk_test.txt\n@@ -1,3 +1,3 @@\n-wrong\n-line2\n-line3\n+correct\n+line2\n+line3\n",
+			cwd:            scratchDir,
+			wantText:       "hunk(s) failed",
+			wantNextAction: "retry",
+			isError:        true,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			params := map[string]interface{}{
+				"name":      "apply_patch",
+				"arguments": map[string]interface{}{"patch": tc.patchContent, "cwd": tc.cwd},
+			}
+
+			result, rpcErr := call(t, sockPath, "tools/call", params)
+			if rpcErr != nil {
+				t.Errorf("RPC error: %d %s", rpcErr.Code, rpcErr.Message)
+				return
+			}
+
+			var out map[string]interface{}
+			if err := json.Unmarshal(result, &out); err != nil {
+				t.Errorf("unmarshal result: %v", err)
+				return
+			}
+
+			isError, _ := out["isError"].(bool)
+			if isError != tc.isError {
+				t.Errorf("isError: got %v, want %v", isError, tc.isError)
+			}
+
+			contentArr, ok := out["content"].([]interface{})
+			if !ok || len(contentArr) == 0 {
+				t.Errorf("expected content array, got %v", out)
+				return
+			}
+			textContent, ok := contentArr[0].(map[string]interface{})["text"].(string)
+			if !ok {
+				t.Errorf("content[0].text not a string: %T", contentArr[0])
+				return
+			}
+
+			if tc.wantText == "" && !tc.isError {
+				if !strings.Contains(strings.ToLower(textContent), "patch") && !strings.Contains(strings.ToLower(textContent), "applied") {
+					t.Errorf("expected success message containing 'patch' or 'applied', got: %s", textContent)
+				}
+			} else if tc.wantText != "" {
+				if !strings.Contains(textContent, tc.wantText) {
+					t.Errorf("content text does not contain %q, got: %s", tc.wantText, textContent)
+				}
+			}
+
+			if tc.wantNextAction != "" {
+				if !strings.Contains(textContent, "next_action: "+tc.wantNextAction) {
+					t.Errorf("next_action not %q in text, got: %s", tc.wantNextAction, textContent)
+				}
+			}
+		})
+	}
+
+	_ = os.Remove(filepath.Join(scratchDir, "success_test.txt"))
+}
