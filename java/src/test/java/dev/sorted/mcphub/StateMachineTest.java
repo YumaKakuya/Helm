@@ -143,7 +143,8 @@ class StateMachineTest {
 
     @Test
     void bridgeDetachTriggersTransition() throws Exception {
-        // REQ-3.7.2: OPEN + BRIDGE_DETACH -> COOLING_DOWN
+        // Low-level session.detach path. Production bridge lifecycle detach is
+        // handled by ControlHandler so OPEN sessions can resume idle timeout.
         sm.transition(StateMachine.Trigger.ARM, "s1");
         sm.transition(StateMachine.Trigger.OPEN, "s1");
         sm.transition(StateMachine.Trigger.BRIDGE_DETACH, "s1");

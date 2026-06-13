@@ -2,20 +2,23 @@
 set -euo pipefail
 
 # MCPHUB installation script — REQ-9.11.1
-# Usage: ./install.sh [--service] [--prefix PATH]
+# Usage: ./install.sh [--service] [--prefix PATH] [--update]
 # Default prefix: $HOME/.local/share/mcphub
+# --update: re-install binary and JAR only (preserves data)
 
 PREFIX="${MCPHUB_PREFIX:-$HOME/.local/share/mcphub}"
 BIN_PREFIX="${MCPHUB_BIN_PREFIX:-$HOME/.local/bin}"
 DATA_DIR="$PREFIX"
 INSTALL_SERVICE=0
+UPDATE_ONLY=0
 
 # Parse args
 while [[ $# -gt 0 ]]; do
     case $1 in
         --service) INSTALL_SERVICE=1; shift ;;
         --prefix)  PREFIX="$2"; DATA_DIR="$2"; shift 2 ;;
-        --help)    echo "Usage: $0 [--service] [--prefix PATH]"; exit 0 ;;
+        --update)  UPDATE_ONLY=1; shift ;;
+        --help)    echo "Usage: $0 [--service] [--prefix PATH] [--update]"; exit 0 ;;
         *)         echo "unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -39,11 +42,18 @@ echo "==================="
 echo "Platform: $PLATFORM"
 echo "Install prefix: $PREFIX"
 echo "Binary prefix:  $BIN_PREFIX"
+if [[ "$UPDATE_ONLY" -eq 1 ]]; then
+    echo "Mode: update (binary + JAR only, data preserved)"
+fi
+echo ""
 
-# Step 1: Create data dir
-mkdir -p "$DATA_DIR"
-mkdir -p "$DATA_DIR/logs"
-chmod 700 "$DATA_DIR"
+# Step 1: Create data dir (unless update-only)
+if [[ "$UPDATE_ONLY" -eq 0 ]]; then
+    mkdir -p "$DATA_DIR"
+    mkdir -p "$DATA_DIR/logs"
+    chmod 700 "$DATA_DIR"
+    echo "Created data directory: $DATA_DIR"
+fi
 
 # Step 2: Copy binaries (assume we are in the MCPHUB repo dir)
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -68,11 +78,25 @@ else
     echo "WARNING: mcphub-core JAR not found — build with './gradlew jar' first"
 fi
 
-# Copy adapters
-if [[ -d "$REPO_DIR/adapters/dist" ]]; then
-    mkdir -p "$PREFIX/adapters"
-    cp -r "$REPO_DIR/adapters/dist/"* "$PREFIX/adapters/"
-    echo "Installed adapters to: $PREFIX/adapters"
+# Copy adapters (unless update-only)
+if [[ "$UPDATE_ONLY" -eq 0 ]]; then
+    if [[ -d "$REPO_DIR/adapters/dist" ]]; then
+        rm -rf "$PREFIX/adapters" 2>/dev/null || true
+        mkdir -p "$PREFIX/adapters"
+        cp -r "$REPO_DIR/adapters/dist/"* "$PREFIX/adapters/"
+        echo "Installed adapters to: $PREFIX/adapters"
+    else
+        echo "WARNING: adapters/dist not found — build with 'npx tsc --build' in adapters/ first"
+    fi
+fi
+
+# Copy dashboard HTML (unless update-only)
+if [[ "$UPDATE_ONLY" -eq 0 ]]; then
+    if [[ -f "$REPO_DIR/java/src/main/resources/dashboard.html" ]]; then
+        # The HTML is bundled inside the JAR, so no need to copy separately.
+        # Present for reference only.
+        :
+    fi
 fi
 
 # Step 3: Optional service install
@@ -81,18 +105,33 @@ if [[ "$INSTALL_SERVICE" -eq 1 ]]; then
         linux)
             UNIT_DIR="$HOME/.config/systemd/user"
             mkdir -p "$UNIT_DIR"
-            sed "s|{{MCPHUB_INSTALL_PATH}}|$BIN_PREFIX/mcphub|g" \
+            sed -e "s|{{MCPHUB_INSTALL_PATH}}|$BIN_PREFIX/mcphub|g" \
+                -e "s|{{MCPHUB_PREFIX}}|$PREFIX|g" \
                 "$REPO_DIR/packaging/systemd/mcphub.service" > "$UNIT_DIR/mcphub.service"
             echo "Installed systemd unit: $UNIT_DIR/mcphub.service"
-            echo "Enable with: systemctl --user daemon-reload && systemctl --user enable --now mcphub"
+            echo ""
+            echo "Enable and start with:"
+            echo "  systemctl --user daemon-reload"
+            echo "  systemctl --user enable --now mcphub"
+            echo ""
+            echo "Check status:"
+            echo "  systemctl --user status mcphub"
+            echo "  mcphub health"
+            echo ""
+            echo "Dashboard: http://localhost:9741"
             ;;
         darwin)
             PLIST_DIR="$HOME/Library/LaunchAgents"
             mkdir -p "$PLIST_DIR"
-            sed "s|{{MCPHUB_INSTALL_PATH}}|$BIN_PREFIX/mcphub|g" \
+            sed -e "s|{{MCPHUB_INSTALL_PATH}}|$BIN_PREFIX/mcphub|g" \
+                -e "s|{{MCPHUB_PREFIX}}|$PREFIX|g" \
                 "$REPO_DIR/packaging/launchd/dev.sorted.mcphub.plist" > "$PLIST_DIR/dev.sorted.mcphub.plist"
             echo "Installed launchd agent: $PLIST_DIR/dev.sorted.mcphub.plist"
-            echo "Load with: launchctl load $PLIST_DIR/dev.sorted.mcphub.plist"
+            echo ""
+            echo "Load with:"
+            echo "  launchctl load $PLIST_DIR/dev.sorted.mcphub.plist"
+            echo ""
+            echo "Dashboard: http://localhost:9741"
             ;;
     esac
 fi

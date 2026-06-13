@@ -291,13 +291,6 @@ public class CapabilityRegistry {
             .findFirst();
     }
 
-    /** Finds a capability by its capability_id. */
-    public Optional<CapabilityEntry> findByCapabilityId(String capabilityId) {
-        return entries.stream()
-            .filter(e -> e.capabilityId.equals(capabilityId))
-            .findFirst();
-    }
-
     /** Returns all entries where enabled=true. */
     public List<CapabilityEntry> getEnabled() {
         return entries.stream()
@@ -340,8 +333,12 @@ public class CapabilityRegistry {
         return switch (displayName) {
             case "webfetch", "websearch" -> "web";
             case "apply_patch" -> "edit";
-            case "todowrite", "list", "codesearch", "lsp" -> "project";
-            case "plan_enter", "plan_exit", "skill", "batch" -> "session";
+            case "todowrite", "list", "codesearch", "lsp",
+                 "task_create", "task_list", "task_update", "task_delete" -> "project";
+            case "nexus_issue_create", "nexus_issue_list",
+                 "nexus_issue_close", "nexus_issue_update" -> "nexus";
+            case "plan_enter", "plan_exit", "skill", "batch",
+                 "mcphub_checkpoint" -> "session";
             case "synthetic_delay" -> "synthetic";
             default -> null;
         };

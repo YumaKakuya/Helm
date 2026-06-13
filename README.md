@@ -1,4 +1,4 @@
-# Helm.
+# MCPHUB
 
 A tool hub and governance layer for AI coding agents. One MCP endpoint, many providers, less context waste.
 
@@ -11,18 +11,18 @@ AI coding agents load ALL tool schemas into every API request. As MCP servers gr
 - **Deferred loading latency**: ToolSearch workarounds add 3-8 seconds per tool use
 - **Cost waste**: Tool schemas burn tokens every turn, regardless of whether tools are used
 
-This is a known problem in the OpenCode ecosystem: [#9350](https://github.com/anomalyco/opencode/issues/9350), [#8625](https://github.com/anomalyco/opencode/issues/8625), [#16206](https://github.com/anomalyco/opencode/issues/16206), [#20489](https://github.com/anomalyco/opencode/issues/20489).
+This is a known problem in the OpenCode ecosystem: [#9350](https://github.com/anomalyco/opencode/issues/9350) (85% token reduction request), [#8625](https://github.com/anomalyco/opencode/issues/8625), [#16206](https://github.com/anomalyco/opencode/issues/16206), [#20489](https://github.com/anomalyco/opencode/issues/20489).
 
-## What Helm Does
+## What MCPHUB Does
 
-Helm sits between your AI agent and your tool providers. Instead of loading every tool schema into every API call, the agent connects to one MCP endpoint and Helm routes requests to the right provider.
+MCPHUB sits between your AI agent and your tool providers. Instead of loading every tool schema into every API call, the agent connects to one MCP endpoint and MCPHUB routes requests to the right provider.
 
 ```
 AI Agent (OpenCode / Claude Code / Cursor)
     |
     |  stdio (single MCP connection)
     v
-+-- Helm. -----------------------------------------+
++-- MCPHUB ----------------------------------------+
 |                                                   |
 |   Go Launcher         Java Daemon                 |
 |   (JRE discovery,     (state machine, policy,     |
@@ -34,11 +34,11 @@ AI Agent (OpenCode / Claude Code / Cursor)
 |        |                                          |
 +--------|------------------------------------------+
          |
-     +---------+---------+---------+---------+-----------+
-     |  web    |  edit   | project | session | synthetic |  <-- TS adapters
-     +---------+---------+---------+---------+-----------+
-     | relay providers (your existing MCP servers)        |
-     +---------------------------------------------------+
+    +---------+---------+---------+---------+
+    |  web    |  edit   | project | session |  <-- TypeScript adapters
+    +---------+---------+---------+---------+
+    | relay providers (Coffer, custom MCP)  |
+    +--------------------------------------+
 ```
 
 Core capabilities:
@@ -46,49 +46,106 @@ Core capabilities:
 - **Single MCP endpoint** aggregating multiple tool providers
 - **Classifier-invisible path** for tools (avoids Anthropic API body-size limits)
 - **Session lifecycle** (Closed / Armed / Open / CoolingDown) with auto-close
-- **Allow/deny policy** per tool, with session-scoped rule injection
-- **Structured failure responses** with error codes, recovery guidance, and fallback suggestions
-- **Route logging** for observability, with intent annotation support
-- **Contract-based disambiguation** (AI asks the hub which tool to use; hub resolves from capability contracts)
+- **Allow/deny policy** per tool
+- **Route logging** for observability
+- **Disambiguation endpoint** (AI asks the hub which tool to use)
 - **Body-budget monitoring** to detect regressions early
-- **Secret scrub** on intent annotations before persistence
+- **Result caching** for read-only tools (session-scoped, eliminates duplicate calls)
+- **Dry-run mode** (preview destructive tool effects before execution)
+- **Task-context filtering** (show only relevant tools per task: coding/research/planning)
+- **Capability-gap explanation** (structured feedback when tools are denied or missing)
+- **LSP support** (hover, go-to-definition, references for TypeScript and Go)
 
 ## Quick Start
 
-### Prerequisites
+### Option 1: Prebuilt Binary (no build tools needed)
 
-- Java 21+
-- Go 1.21+
-- Node.js 18+
-- Linux or macOS (Windows via WSL)
-
-### Build
+Download the latest release for your platform from the release page of the repository you are installing from:
 
 ```bash
-git clone https://github.com/YumaKakuya/helm.git
-cd helm
+# Linux (amd64)
+curl -L https://github.com/<owner>/<repo>/releases/latest/download/mcphub-linux-amd64.tar.gz | tar xz
+cd mcphub
 
-# Build Go launcher
-go build -o helm ./cmd/mcphub
+# macOS (Apple Silicon)
+curl -L https://github.com/<owner>/<repo>/releases/latest/download/mcphub-darwin-arm64.tar.gz | tar xz
+cd mcphub
+```
 
-# Build Java daemon
-cd java && ./gradlew jar && cd ..
+Requires: Java 21+ runtime, Node.js 18+
 
-# Build TypeScript adapters
-cd adapters && npm install && npx tsc && cd ..
+### Option 2: Docker (zero dependencies)
+
+```bash
+docker run --rm -it ghcr.io/<owner>/<image>
+```
+
+### Option 3: Build from source
+
+Prerequisites: Java 21+, Go 1.25+, Node.js 20+, Linux or macOS (Windows via WSL)
+
+```bash
+git clone https://github.com/<owner>/<repo>.git
+cd <repo>
+make
+```
+
+This builds all three components (Java fat-JAR, Go launcher, TypeScript adapters) in one command.
+
+Other useful targets:
+
+```bash
+make test       # Run all tests (Java + Go)
+make install    # Build + install to ~/.local
+make release    # Build release archives (all platforms)
+make clean      # Remove all build artifacts
+make dev        # Build + run daemon (foreground)
+make help       # Show all targets
 ```
 
 ### Configure your AI agent
 
-Add Helm as an MCP server in your agent's config. Example for OpenCode (`opencode.jsonc`):
+Add MCPHUB as an MCP server in your agent's config. The shell wrapper handles daemon startup, session opening, and bridge connection automatically.
+
+Replace `/path/to/MCPHUB` with the actual path to your MCPHUB directory.
+
+#### OpenCode / Hatch (`opencode.jsonc`)
 
 ```jsonc
 {
   "mcp": {
-    "helm": {
+    "mcphub": {
       "type": "local",
-      "command": ["sh", "-c", "cd /path/to/helm && (./helm health >/dev/null 2>&1 || (./helm _daemon </dev/null >/dev/null 2>/dev/null & sleep 3)) && ./helm open >/dev/null 2>&1 && exec ./helm bridge"],
+      "command": ["sh", "-c", "cd /path/to/MCPHUB && (./mcphub health >/dev/null 2>&1 || (./mcphub _daemon </dev/null >/dev/null 2>/dev/null & sleep 3)) && ./mcphub open >/dev/null 2>&1 && exec ./mcphub bridge"],
       "enabled": true
+    }
+  }
+}
+```
+
+#### Claude Code (`~/.claude.json`)
+
+```json
+{
+  "mcpServers": {
+    "mcphub": {
+      "command": "sh",
+      "args": ["-c", "cd /path/to/MCPHUB && (./mcphub health >/dev/null 2>&1 || (./mcphub _daemon </dev/null >/dev/null 2>/dev/null & sleep 3)) && ./mcphub open >/dev/null 2>&1 && exec ./mcphub bridge"]
+    }
+  }
+}
+```
+
+#### Cursor (MCP Settings)
+
+In Cursor Settings > MCP, add a new server:
+
+```json
+{
+  "mcpServers": {
+    "mcphub": {
+      "command": "sh",
+      "args": ["-c", "cd /path/to/MCPHUB && (./mcphub health >/dev/null 2>&1 || (./mcphub _daemon </dev/null >/dev/null 2>/dev/null & sleep 3)) && ./mcphub open >/dev/null 2>&1 && exec ./mcphub bridge"]
     }
   }
 }
@@ -97,13 +154,24 @@ Add Helm as an MCP server in your agent's config. Example for OpenCode (`opencod
 ### Verify
 
 ```bash
-./helm start
-./helm health       # {"status":"ok","state":"CLOSED"}
-./helm open         # {"state":"OPEN","session_id":"..."}
-./helm status
+# Start daemon
+./mcphub start
+
+# Check health
+./mcphub health
+# {"status":"ok","state":"CLOSED"}
+
+# Open session
+./mcphub open
+# {"state":"OPEN","session_id":"..."}
+
+# Check status
+./mcphub status
 ```
 
 ### Web search setup (optional)
+
+MCPHUB includes a websearch tool powered by Brave Search API:
 
 ```bash
 # Get a free API key at https://api-dashboard.search.brave.com/
@@ -114,93 +182,92 @@ chmod 600 ~/.config/mcphub/brave-api-key
 
 ## What It Solves
 
-| Problem | Status |
-|---------|--------|
-| Tool body-size API errors | Resolved |
-| ToolSearch deferred loading (3-8s) | Eliminated |
-| Tool exposure governance | Working |
-| Route logging and observability | Working |
-| Multi-MCP-server aggregation | Working |
-| Disambiguation | Working (contract-based resolution) |
-| Body-budget monitoring | Working |
-| Intent annotation | Working (schema-documented, route-logged, secret-scrubbed) |
-| Session-scoped policy rules | Working |
-| Structured failure recovery | Working (error codes, fallback guidance, next actions) |
+| Problem | Status | Details |
+|---------|--------|---------|
+| Tool body-size API errors | Resolved | Tools on classifier-invisible MCP path |
+| ToolSearch deferred loading (3-8s) | Eliminated | Direct tool access, no roundtrip |
+| Tool exposure governance | Working | Allow/deny policy, session lifecycle |
+| Route logging | Working | Every tool call logged with routing decision |
+| Multi-MCP-server aggregation | Working | Single endpoint for all providers |
+| Disambiguation | Working | AI can ask which tool is appropriate |
+| Body-budget monitoring | Working | Alerts before regressions become visible |
 
 ## What It Does Not Solve Yet
 
-| Item | Status |
-|------|--------|
-| Task-context filtering | Planned |
-| Result caching | Planned |
-| Dry-run mode | Planned |
-| Management UI | Not started |
-| Full LSP support | Alpha stub |
+| Item | Status | Notes |
+|------|--------|-------|
+| Management UI | Not started | CLI only for now |
 
 ## Hosted Tools
 
-| Adapter | Tools | Type |
-|---------|-------|------|
-| web | `webfetch`, `websearch` | builtin |
-| edit | `apply_patch` | builtin |
-| project | `todowrite`, `list`, `codesearch`, `lsp` | builtin |
-| session | `plan_enter`, `plan_exit`, `skill`, `batch` | builtin |
+MCPHUB includes adapters for commonly needed tools, plus hub-level tools:
+
+| Adapter | Tools |
+|---------|-------|
+| web | `webfetch`, `websearch` |
+| edit | `apply_patch` |
+| project | `todowrite`, `list`, `codesearch`, `lsp`, `task_create`, `task_list`, `task_update`, `task_delete` |
+| nexus | `nexus_issue_create`, `nexus_issue_list`, `nexus_issue_close`, `nexus_issue_update` |
+| session | `plan_enter`, `plan_exit`, `skill`, `batch` |
+| hub | `mcphub_disambiguate`, `mcphub_set_task_context`, `mcphub.session.open`, `mcphub_checkpoint` |
+
+When the session is CLOSED or ARMED, only `mcphub.session.open` is exposed in the tool list. If the client/model cannot call that MCP tool directly, run `mcphub open` from the CLI.
 
 ## Relay Providers
 
-Relay providers are external MCP servers that Helm connects to via subprocess stdio. Any MCP server that speaks JSON-RPC over stdio can be added as a relay provider.
-
-To configure relay providers:
-
-1. Copy the example config:
-   ```bash
-   mkdir -p ~/.config/mcphub
-   cp java/src/main/resources/relays-example.yaml ~/.config/mcphub/relays.yaml
-   ```
-
-2. Edit `~/.config/mcphub/relays.yaml` and add your relay entries. Each relay defines a subprocess command and the tools it exposes.
-
-3. Alternatively, set a custom path via environment variable:
-   ```bash
-   export MCPHUB_RELAYS_PATH=/path/to/custom-relays.yaml
-   ```
-
-Relay tools are loaded dynamically at startup and appear alongside built-in tools in `tools/list`.
+MCPHUB can relay requests to external MCP servers. Any MCP-compatible server can be added as a relay provider, aggregated behind the single MCPHUB endpoint.
 
 ## Performance
+
+Measured overhead (excluding upstream provider execution time):
 
 | Metric | Value | Target |
 |--------|-------|--------|
 | p50 latency | 1ms | <50ms |
 | p99 latency | 3ms | <100ms |
 
-## CLI
+## CLI Reference
 
 ```
-helm start          Start the daemon
-helm stop           Stop the daemon
-helm health         Liveness check
-helm status         Current state and session info
-helm open           Open a session (idempotent)
-helm close          Close the current session
-helm lock           Emergency lock
-helm capabilities   List registered tools
-helm bridge         Run stdio bridge (used by AI agents)
+mcphub start          Start the daemon
+mcphub stop           Stop the daemon
+mcphub health         Liveness check
+mcphub status         Current state, session info, uptime
+mcphub open           Arm + open a session (idempotent)
+mcphub close          Close the current session
+mcphub lock           Emergency lock (rejects all tool calls)
+mcphub unlock         Clear emergency lock
+mcphub capabilities   List registered tools and their status
+mcphub bridge         Run stdio bridge (used by AI agents)
+mcphub version        Print version
+mcphub query --sql    Read-only SQL against mcphub.db
 ```
 
-The daemon also exposes a control surface for runtime policy management:
+## Documentation
+
+- [Getting Started](docs/guide/getting-started.md) -- 5-minute onboarding
+- [Relay Provider Setup](docs/guide/relay-setup.md) -- Connect external MCP servers
+- [Policy Configuration](docs/guide/policy-guide.md) -- Allow/deny/hide rules
+- [API Reference](docs/guide/api-reference.md) -- Full control surface and MCP endpoints
+- [Benchmark Report](docs/guide/benchmark-report.md) -- Performance measurements
+- [Context Reduction Report](docs/guide/context-reduction-report.md) -- Token savings analysis
+
+## Project Structure
 
 ```
-mcphub.control.add_session_rule   Add a session-scoped allow/deny/hide rule
+cmd/mcphub/       Go launcher (JRE discovery + process management)
+java/             Java daemon (state machine, policy, routing, registry)
+adapters/         TypeScript tool adapters (web, edit, project, session)
+integration/      Integration tests
+packaging/        systemd / launchd service templates
+install.sh        Install script
 ```
-
-Session rules are automatically purged when the session closes.
 
 ## Project Status
 
 **Alpha (daily driver since 2026-04-19)**
 
-Built by [Sorted.](https://github.com/YumaKakuya) for AI multi-agent orchestration.
+Built by [Sorted.](https://github.com/OWNER) as part of the AXIOM product line for AI multi-agent orchestration.
 
 ## License
 

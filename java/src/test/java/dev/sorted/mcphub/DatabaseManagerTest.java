@@ -33,12 +33,12 @@ class DatabaseManagerTest {
     }
 
     @Test
-    void schemaVersionIsOne() throws Exception {
-        // REQ-8.2.5: schema_version = 1 after migration
+    void schemaVersionIsV2() throws Exception {
+        // REQ-8.2.5: schema_version = 2 after V2 migration (client_name, client_version)
         try (Statement st = db.getConnection().createStatement();
              ResultSet rs = st.executeQuery("SELECT version FROM schema_version")) {
             assertTrue(rs.next());
-            assertEquals(1, rs.getInt(1));
+            assertEquals(2, rs.getInt(1));
         }
     }
 

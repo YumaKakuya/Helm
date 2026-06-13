@@ -22,6 +22,11 @@ const TOOLS = [
     name: 'batch',
     description: 'Execute a batch of multiple tool operations in sequence.',
     inputSchema: { type: 'object', properties: { operations: { type: 'array', items: { type: 'object', properties: { tool: { type: 'string' }, arguments: { type: 'object' } } }, description: 'Tool operations to execute' } }, required: ['operations'] }
+  },
+  {
+    name: 'mcphub_checkpoint',
+    description: 'Save current session state (tasks, nexus issues, handover note) as a persistent checkpoint for next-session handoff. Modifies local state.',
+    inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Handover message — what was done, what remains, context for next session' }, project: { type: 'string', description: 'Project name for nexus issue listing (optional)' } }, required: ['message'] }
   }
 ];
 

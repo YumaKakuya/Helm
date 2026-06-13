@@ -57,3 +57,5 @@ credentials*
 
 # Logs
 *.log
+# Git backup directories
+git-backup-*/

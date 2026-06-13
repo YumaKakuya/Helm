@@ -66,6 +66,17 @@ function httpRequest(
   maxRedirects = MAX_REDIRECTS
 ): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const safeResolve = (resp: HttpResponse) => {
+      if (settled) return;
+      settled = true;
+      resolve(resp);
+    };
+    const safeReject = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
     const url = new URL(urlStr);
     const lib = url.protocol === 'https:' ? https : http;
     const headers: Record<string, string> = {
@@ -91,37 +102,29 @@ function httpRequest(
           redirectUrl = `${url.protocol}//${url.host}${redirectUrl}`;
         }
         res.resume(); // consume response body
-        httpRequest(redirectUrl, method, body, extraHeaders, maxRedirects - 1).then(resolve, reject);
+        httpRequest(redirectUrl, method, body, extraHeaders, maxRedirects - 1).then(safeResolve, safeReject);
         return;
       }
       let data = '';
-      let truncated = false;
+      const complete = () => safeResolve({
+        statusCode: res.statusCode || 0,
+        headers: res.headers as Record<string, string | string[] | undefined>,
+        body: data,
+        finalUrl: urlStr
+      });
       res.on('data', (chunk: Buffer) => {
-        if (truncated) return;
         data += chunk.toString();
+        // Truncate early to avoid memory issues
         if (data.length > MAX_BODY_CHARS * 2) {
-          truncated = true;
+          complete();
           res.destroy();
-          resolve({
-            statusCode: res.statusCode || 0,
-            headers: res.headers as Record<string, string | string[] | undefined>,
-            body: data.slice(0, MAX_BODY_CHARS * 2),
-            finalUrl: urlStr
-          });
         }
       });
-      res.on('end', () => {
-        if (truncated) return;
-        resolve({
-          statusCode: res.statusCode || 0,
-          headers: res.headers as Record<string, string | string[] | undefined>,
-          body: data,
-          finalUrl: urlStr
-        });
-      });
+      res.on('end', complete);
+      res.on('error', safeReject);
     });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out (30s)')); });
+    req.on('error', safeReject);
+    req.on('timeout', () => { req.destroy(); safeReject(new Error('Request timed out (30s)')); });
     if (body) req.write(body);
     req.end();
   });

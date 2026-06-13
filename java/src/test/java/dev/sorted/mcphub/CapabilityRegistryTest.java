@@ -25,20 +25,21 @@ class CapabilityRegistryTest {
     }
 
     // -----------------------------------------------------------------------
-    // Test 1: load() with embedded capabilities.yaml — 15 entries, 0 rejected
-    // (15 builtin-hosted + task). synthetic_delay is a TEST FIXTURE,
+    // Test 1: load() with embedded capabilities.yaml — 11 entries, 0 rejected
+    // (11 builtin-hosted). synthetic_delay is a TEST FIXTURE,
     // kept out of production capabilities.yaml — loaded via MCPHUB_TEST_FIXTURE.
     // -----------------------------------------------------------------------
 
     @Test
-    void loadEmbeddedYaml_15EntriesLoaded_0Rejected() throws Exception {
+    void loadEmbeddedYaml_20EntriesLoaded_0Rejected() throws Exception {
         try (InputStream is = getClass().getClassLoader().getResourceAsStream("capabilities.yaml")) {
             assertNotNull(is, "capabilities.yaml must be on classpath");
             registry.load(is);
         }
-        assertEquals(15, registry.getLoadedCount(), "Expected 15 capabilities (builtin-hosted + task)");
+        // 20 capabilities: 11 original + 4 nexus + 4 task + 1 mcphub_checkpoint
+        assertEquals(20, registry.getLoadedCount(), "Expected 20 capabilities (builtin-hosted + nexus + task + checkpoint)");
         assertEquals(0, registry.getRejectedCount(), "Expected 0 rejected entries");
-        assertEquals(15, registry.getAll().size());
+        assertEquals(20, registry.getAll().size());
     }
 
     // -----------------------------------------------------------------------

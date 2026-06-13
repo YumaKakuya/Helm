@@ -1,0 +1,5 @@
+# P1-pre curated export fixture allowlist notes.
+# SecretScannerTest.java and McpHandlerTest.java contain synthetic test fixtures
+# documented as non-real credentials. Current gitleaks directory-scan
+# fingerprints include absolute output paths, so deterministic fixture
+# allowlisting is enforced in .gitleaks.toml below.

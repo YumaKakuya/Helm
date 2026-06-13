@@ -20,13 +20,19 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>MCPHUB_DATA_DIR</key>
-    <string>${HOME}/.local/share/mcphub</string>
+    <string>{{MCPHUB_PREFIX}}</string>
+    <key>MCPHUB_ADAPTER_DIR</key>
+    <string>{{MCPHUB_PREFIX}}/adapters</string>
+    <key>MCPHUB_HOME</key>
+    <string>{{MCPHUB_PREFIX}}</string>
+    <key>MCPHUB_DASHBOARD_ENABLED</key>
+    <string>1</string>
   </dict>
 
   <key>StandardOutPath</key>
-  <string>${HOME}/.local/share/mcphub/logs/mcphub.out.log</string>
+  <string>{{MCPHUB_PREFIX}}/logs/mcphub.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>${HOME}/.local/share/mcphub/logs/mcphub.err.log</string>
+  <string>{{MCPHUB_PREFIX}}/logs/mcphub.err.log</string>
 </dict>
 </plist>

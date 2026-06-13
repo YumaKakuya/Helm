@@ -3,12 +3,15 @@ Description=MCPHUB Daemon
 After=network.target
 
 [Service]
-Type=notify
+Type=simple
 ExecStart={{MCPHUB_INSTALL_PATH}} _daemon
-ExecStop={{MCPHUB_INSTALL_PATH}} stop
+ExecStop={{MCPHUB_INSTALL_PATH}} close
 Restart=on-failure
 RestartSec=5
 Environment=MCPHUB_DATA_DIR=%h/.local/share/mcphub
+Environment=MCPHUB_ADAPTER_DIR={{MCPHUB_PREFIX}}/adapters
+Environment=MCPHUB_HOME={{MCPHUB_PREFIX}}
+Environment=MCPHUB_DASHBOARD_ENABLED=1
 
 [Install]
 WantedBy=default.target

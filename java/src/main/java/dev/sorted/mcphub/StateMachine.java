@@ -27,7 +27,10 @@ public class StateMachine {
     }
 
     public enum Trigger {
-        ARM, OPEN, CLOSE, LOCK, UNLOCK, ARM_TIMEOUT, IDLE_TIMEOUT, BRIDGE_DETACH, DRAIN_COMPLETE
+        ARM, OPEN, CLOSE, LOCK, UNLOCK, ARM_TIMEOUT, IDLE_TIMEOUT,
+        // Low-level session.detach semantics. Normal bridge lifecycle detach is
+        // handled in ControlHandler so OPEN sessions can fall back to idle timeout.
+        BRIDGE_DETACH, DRAIN_COMPLETE
     }
 
     // Listener for state change events (for logging to DB)

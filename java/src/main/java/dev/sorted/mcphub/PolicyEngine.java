@@ -26,12 +26,18 @@ public class PolicyEngine {
     private final List<PolicyRule> globalRules = new ArrayList<>();
     private final List<PolicyRule> sessionRules = new ArrayList<>();
 
+    /** Maximum priority value for user-defined rules. Session rules add PRIORITY_BOOST internally. */
+    public static final int MAX_USER_PRIORITY = 9999;
+    /** Internal boost applied to session rules so they always override global rules (REQ-7.5.2). */
+    static final int PRIORITY_BOOST = 10000;
+
     /** Load global rules (from registry config). Replaces any previously loaded global rules. */
     public void loadGlobalRules(List<PolicyRule> rules) {
         globalRules.clear();
         if (rules != null) {
             for (PolicyRule r : rules) {
                 if ("global".equals(r.scope) || r.scope == null) {
+                    r.priority = clampPriority(r.priority);
                     globalRules.add(r);
                 }
             }
@@ -42,6 +48,7 @@ public class PolicyEngine {
     /** Add a session-scoped rule. REQ-7.5.1 */
     public void addSessionRule(PolicyRule rule) {
         rule.scope = "session";
+        rule.priority = clampPriority(rule.priority);
         sessionRules.add(rule);
     }
 
@@ -62,18 +69,16 @@ public class PolicyEngine {
     public PolicyResult evaluate(String toolName) {
         if (toolName == null) return new PolicyResult(Decision.DENY, null);
 
-        // Session rules have effective higher priority than global (REQ-7.5.2)
-        // We model this by adding session rule priority + 10000 offset internally
+        // Session rules have effective higher priority than global (REQ-7.5.2).
+        // User priorities are clamped to [0, MAX_USER_PRIORITY]. Session rules get
+        // PRIORITY_BOOST added internally, guaranteeing they always outrank global rules.
         List<PolicyRule> allRules = new ArrayList<>(sessionRules.size() + globalRules.size());
-        // Session rules: boost priority by large offset to model REQ-7.5.2
         for (PolicyRule r : sessionRules) {
             PolicyRule boosted = new PolicyRule();
             boosted.ruleId = r.ruleId;
             boosted.toolPattern = r.toolPattern;
             boosted.action = r.action;
-            // REQ-7.5.2: session rules have higher default priority than global,
-            // unless operator explicitly sets negative priority (opt-out of boost)
-            boosted.priority = r.priority >= 0 ? r.priority + 10000 : r.priority;
+            boosted.priority = r.priority + PRIORITY_BOOST;
             boosted.scope = "session";
             allRules.add(boosted);
         }
@@ -160,5 +165,23 @@ public class PolicyEngine {
             case "deny" -> 1;
             default     -> 0;
         };
+    }
+
+    /**
+     * Clamp user-defined priority to [0, MAX_USER_PRIORITY].
+     * Negative priorities are set to 0. Values above MAX_USER_PRIORITY are capped.
+     * This ensures session rules (which add PRIORITY_BOOST) always outrank global rules.
+     * BL-19: QA NF-2 fix.
+     */
+    private int clampPriority(int priority) {
+        if (priority < 0) {
+            log.warn("PolicyEngine: negative priority {} clamped to 0", priority);
+            return 0;
+        }
+        if (priority > MAX_USER_PRIORITY) {
+            log.warn("PolicyEngine: priority {} exceeds max {}, clamped", priority, MAX_USER_PRIORITY);
+            return MAX_USER_PRIORITY;
+        }
+        return priority;
     }
 }

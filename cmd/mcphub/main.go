@@ -62,6 +62,7 @@ func execJava(javaArgs []string) {
 			env = append(env, "MCPHUB_ADAPTER_DIR="+adapterDir)
 		}
 	}
+	env = withDefaultCliCommand(env)
 
 	err := syscall.Exec(jre, args, env)
 	// If exec fails, fall back to os/exec
@@ -70,6 +71,7 @@ func execJava(javaArgs []string) {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+		cmd.Env = env
 		if err := cmd.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "mcphub: %v\n", err)
 			os.Exit(1)
@@ -84,6 +86,8 @@ func startDaemon() {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	env := withDefaultCliCommand(os.Environ())
+	cmd.Env = env
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "mcphub: failed to start daemon: %v\n", err)
 		os.Exit(1)
@@ -139,6 +143,18 @@ func stopDaemon() {
 	}
 	fmt.Fprintln(os.Stderr, "mcphub: daemon did not stop within 10 seconds")
 	os.Exit(1)
+}
+
+func withDefaultCliCommand(env []string) []string {
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "MCPHUB_CLI_COMMAND=") {
+			return env
+		}
+	}
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		return append(env, "MCPHUB_CLI_COMMAND="+exe)
+	}
+	return env
 }
 
 // findArtifacts locates the bundled JRE and mcphub-core.jar.

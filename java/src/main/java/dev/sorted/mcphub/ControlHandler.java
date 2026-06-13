@@ -46,10 +46,23 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
     private PolicyEngine policy;
     private BodyBudgetService bodyBudget;
     private ProviderHealthTracker healthTracker;
+    private McpHandler mcpHandler; // OS-12: for cache clear on session close
     private final AtomicInteger activeBridgeCount = new AtomicInteger(0);
     private final Set<Long> bridgePids = ConcurrentHashMap.newKeySet();
     private final Map<Long, Instant> bridgeLastPing = new ConcurrentHashMap<>();
+    // REQ-3.7.6/3.7.7: tracks when a bridge pid was first observed dead.
+    // Keyed by pid; entry is removed when bridge becomes alive again or is cleaned up.
+    private final Map<Long, Instant> bridgeDeadSince = new ConcurrentHashMap<>();
     private final ScheduledExecutorService janitorExecutor;
+
+    // REQ-3.7.6/3.7.7: janitor runs every JANITOR_INTERVAL_SEC to detect dead bridges
+    // using ProcessHandle.isAlive(). A bridge is not removed until it has been continuously
+    // dead for at least BRIDGE_GRACE_SEC seconds. A live bridge is never removed based on
+    // ping age alone — isAlive() is the primary signal.
+    // JANITOR_INTERVAL_SEC=1 with BRIDGE_GRACE_SEC=5 gives ~5s detection granularity
+    // with minimal overhead (local ProcessHandle checks only).
+    private static final int JANITOR_INTERVAL_SEC = 1;
+    private static final int BRIDGE_GRACE_SEC = 5;
 
     /** Backward-compatible constructor (Session 1 tests). */
     public ControlHandler(StateMachine stateMachine, SessionManager sessionManager,
@@ -67,7 +80,7 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             return t;
         });
         wireCallbacks();
-        janitorExecutor.scheduleWithFixedDelay(this::janitorTask, 60, 60, TimeUnit.SECONDS);
+        janitorExecutor.scheduleWithFixedDelay(this::janitorTask, JANITOR_INTERVAL_SEC, JANITOR_INTERVAL_SEC, TimeUnit.SECONDS);
     }
 
     /** Full constructor for Session 2+. */
@@ -87,7 +100,7 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             return t;
         });
         wireCallbacks();
-        janitorExecutor.scheduleWithFixedDelay(this::janitorTask, 60, 60, TimeUnit.SECONDS);
+        janitorExecutor.scheduleWithFixedDelay(this::janitorTask, JANITOR_INTERVAL_SEC, JANITOR_INTERVAL_SEC, TimeUnit.SECONDS);
     }
 
     /** Shutdown the bridge janitor executor. Call on daemon shutdown or test teardown. */
@@ -98,6 +111,11 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
     /** Optional wiring for REQ-4.7.2 runtime provider health visibility. */
     public void setHealthTracker(ProviderHealthTracker healthTracker) {
         this.healthTracker = healthTracker;
+    }
+
+    /** OS-12: Wire McpHandler for result cache clear on session close. */
+    public void setMcpHandler(McpHandler mcpHandler) {
+        this.mcpHandler = mcpHandler;
     }
 
     private void wireCallbacks() {
@@ -122,6 +140,12 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             if (policy != null && to == StateMachine.State.COOLING_DOWN) {
                 policy.clearSessionRules();
             }
+            // OS-12: Clear result cache on session close
+            if (mcpHandler != null && to == StateMachine.State.COOLING_DOWN) {
+                mcpHandler.getResultCache().clear();
+                // OS-14: Reset task context on session close
+                mcpHandler.getTaskContextFilter().reset();
+            }
             // Reset adapter confirmation runtime state on session close.
             if (registry != null && to == StateMachine.State.COOLING_DOWN) {
                 registry.resetRuntimeStates();
@@ -135,6 +159,7 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
                 activeBridgeCount.set(0);
                 bridgePids.clear();
                 bridgeLastPing.clear();
+                bridgeDeadSince.clear();
                 log.info("Session closed, active bridges reset to 0");
             }
         });
@@ -181,18 +206,17 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
             sessionManager.resetActivity();
         }
         return switch (method) {
-            case "mcphub.control.status"           -> handleStatus();
-            case "mcphub.control.arm"              -> handleArm();
-            case "mcphub.control.open"             -> handleOpen();
-            case "mcphub.control.close"            -> handleClose();
+            case "mcphub.control.status"       -> handleStatus();
+            case "mcphub.control.arm"          -> handleArm();
+            case "mcphub.control.open"         -> handleOpen();
+            case "mcphub.control.close"        -> handleClose();
             case "mcphub.control.bridge_attach"-> handleBridgeAttach(params);
             case "mcphub.control.bridge_ping"  -> handleBridgePing(params);
             case "mcphub.control.bridge_detach"-> handleBridgeDetach(params);
-            case "mcphub.control.lock"             -> handleLock(params);
-            case "mcphub.control.unlock"           -> handleUnlock();
-            case "mcphub.control.health"           -> handleHealth();
-            case "mcphub.control.capabilities"     -> handleCapabilities();
-            case "mcphub.control.add_session_rule" -> handleAddSessionRule(params);
+            case "mcphub.control.lock"         -> handleLock(params);
+            case "mcphub.control.unlock"       -> handleUnlock();
+            case "mcphub.control.health"       -> handleHealth();
+            case "mcphub.control.capabilities" -> handleCapabilities();
             default -> throw new JsonRpcServer.JsonRpcException(
                 JsonRpcServer.ERR_NOT_FOUND, "Unknown method: " + method);
         };
@@ -430,69 +454,66 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
         return r;
     }
 
-    /** mcphub.control.bridge_detach — decrement bridge count; resume idle timer when last bridge leaves. */
+    /**
+     * mcphub.control.bridge_detach: decrement bridge count. When the last
+     * bridge leaves, return the session to idle-timeout tracking instead of
+     * closing immediately. This keeps short-lived bridge clients usable while
+     * preserving REQ-3.7.4's default 300s idle-close behavior.
+     */
     private JsonNode handleBridgeDetach(JsonNode params) {
         long pid = params != null && params.has("pid") ? params.get("pid").asLong(-1) : -1;
-        // Only decrement if this PID was a known attached bridge
         boolean wasKnown = pid >= 0 && bridgePids.remove(pid);
-        if (wasKnown) {
-            bridgeLastPing.remove(pid);
-            int count = activeBridgeCount.updateAndGet(c -> c > 0 ? c - 1 : 0);
-            log.info("Bridge detached (pid={}). Active bridges: {}", pid, count);
-            if (count == 0) {
-                sessionManager.resumeIdleTimer();
-                bridgePids.clear();
-                bridgeLastPing.clear();
-            }
-        } else {
+        if (!wasKnown) {
             log.debug("Bridge detach for unknown pid={}, ignoring", pid);
+            ObjectNode r = mapper.createObjectNode();
+            r.put("status", "ok");
+            r.put("active_bridges", activeBridgeCount.get());
+            return r;
         }
+
+        bridgeLastPing.remove(pid);
+        bridgeDeadSince.remove(pid);
+        int count = activeBridgeCount.updateAndGet(c -> c > 0 ? c - 1 : 0);
+        log.info("Bridge detached (pid={}). Active bridges: {}", pid, count);
+
+        if (count == 0) {
+            bridgePids.clear();
+            bridgeLastPing.clear();
+            bridgeDeadSince.clear();
+        }
+
+        StateMachine.State current = stateMachine.getState();
+        boolean failed = false;
+        String failureReason = null;
+        if (count == 0 && current == StateMachine.State.ARMED) {
+            String sessionId = sessionManager.getCurrentSessionId();
+            try {
+                stateMachine.transition(StateMachine.Trigger.CLOSE, sessionId);
+                sessionManager.endSession();
+            } catch (StateMachine.TransitionException e) {
+                log.warn("ARMED bridge detach transition failed: {} (state={})", e.getMessage(), current);
+                failed = true;
+                failureReason = "transition_failed: " + e.getMessage();
+            }
+        } else if (count == 0 && current == StateMachine.State.OPEN) {
+            sessionManager.resumeIdleTimer();
+            log.info("Last bridge detached; idle timer resumed");
+        }
+
         ObjectNode r = mapper.createObjectNode();
-        r.put("status", "ok");
         r.put("active_bridges", activeBridgeCount.get());
+        if (failed) {
+            r.put("status", "error");
+            r.put("reason", failureReason);
+        } else {
+            r.put("status", "ok");
+        }
         return r;
     }
 
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
-
-    /** mcphub.control.add_session_rule — REQ-7.5.1 */
-    private JsonNode handleAddSessionRule(JsonNode params) throws JsonRpcServer.JsonRpcException {
-        StateMachine.State current = stateMachine.getState();
-        if (current != StateMachine.State.ARMED && current != StateMachine.State.OPEN) {
-            throw new JsonRpcServer.JsonRpcException(-32001,
-                "add_session_rule requires Armed or Open state");
-        }
-        if (params == null || !params.has("tool_pattern") || !params.has("action")) {
-            throw new JsonRpcServer.JsonRpcException(-32602,
-                "Missing required params: tool_pattern and action");
-        }
-        String toolPattern = params.get("tool_pattern").asText();
-        String action = params.get("action").asText().toLowerCase();
-        if (!"allow".equals(action) && !"deny".equals(action) && !"hide".equals(action)) {
-            throw new JsonRpcServer.JsonRpcException(-32602,
-                "Invalid action: " + action + ". Must be allow, deny, or hide.");
-        }
-
-        PolicyRule rule = new PolicyRule();
-        rule.ruleId = params.has("rule_id") ? params.get("rule_id").asText()
-                : ("session-" + toolPattern + "-" + action);
-        rule.toolPattern = toolPattern;
-        rule.action = action;
-        rule.priority = params.has("priority") ? params.get("priority").asInt(100) : 100;
-        rule.scope = "session";
-
-        policy.addSessionRule(rule);
-        log.info("Added session rule: id={}, pattern={}, action={}", rule.ruleId, toolPattern, action);
-
-        ObjectNode r = mapper.createObjectNode();
-        r.put("status", "ok");
-        r.put("rule_id", rule.ruleId);
-        r.put("scope", "session");
-        r.put("state", current.name());
-        return r;
-    }
 
     /** Simulate drain and transition to CLOSED. (Session 1: immediate drain) */
     private void doCoolingDownAndClose(String sessionId, String trigger) {
@@ -505,24 +526,57 @@ public class ControlHandler implements JsonRpcServer.MethodHandler {
         }
     }
 
-    /** Janitor: detect crashed bridges and clean up counts. */
+    /** Janitor: detect crashed bridges and clean up counts. REQ-3.7.6/3.7.7
+     *
+     * Three-state dead-bridge state machine per pid:
+     *   1. ALIVE: ProcessHandle.isAlive()==true → clear bridgeDeadSince marker if set.
+     *   2. NEWLY_DEAD: isAlive()==false && no bridgeDeadSince entry → record now.
+     *   3. READY_TO_REMOVE: isAlive()==false && (now - bridgeDeadSince) >= BRIDGE_GRACE_SEC
+     *      -> remove pid/ping/dead marker, decrement count, resume idle timer if count==0.
+     */
     private void janitorTask() {
         try {
             Instant now = Instant.now();
             for (Long pid : new ArrayList<>(bridgePids)) {
-                Instant lastPing = bridgeLastPing.get(pid);
-                if (lastPing == null) {
-                    lastPing = Instant.now();
+                // REQ-3.7.6: check ProcessHandle.isAlive() every JANITOR_INTERVAL_SEC.
+                // This is cheap enough to call on every bridge every pass.
+                boolean alive = ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
+                if (alive) {
+                    // Case 1: bridge is alive — clear any dead marker.
+                    bridgeDeadSince.remove(pid);
+                    continue;
                 }
-                if (now.getEpochSecond() - lastPing.getEpochSecond() > 180) {
-                    boolean alive = ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
-                    if (!alive) {
-                        log.warn("Bridge pid {} appears dead, removing", pid);
-                        bridgePids.remove(pid);
-                        bridgeLastPing.remove(pid);
-                        int count = activeBridgeCount.updateAndGet(c -> c > 0 ? c - 1 : 0);
-                        if (count == 0) {
+                // Case 2: bridge is dead.
+                Instant deadSince = bridgeDeadSince.get(pid);
+                if (deadSince == null) {
+                    // First observation of death — mark and wait for grace period.
+                    bridgeDeadSince.put(pid, now);
+                    log.debug("Bridge pid {} observed dead, starting {}s grace timer", pid, BRIDGE_GRACE_SEC);
+                    continue;
+                }
+                // Case 3: bridge has been dead since deadSince — check grace period.
+                if (now.getEpochSecond() - deadSince.getEpochSecond() >= BRIDGE_GRACE_SEC) {
+                    log.warn("Bridge pid {} dead for >= {}s, removing", pid, BRIDGE_GRACE_SEC);
+                    bridgePids.remove(pid);
+                    bridgeLastPing.remove(pid);
+                    bridgeDeadSince.remove(pid);
+                    int count = activeBridgeCount.updateAndGet(c -> c > 0 ? c - 1 : 0);
+                    if (count == 0) {
+                        bridgePids.clear();
+                        bridgeLastPing.clear();
+                        bridgeDeadSince.clear();
+                        StateMachine.State current = stateMachine.getState();
+                        if (current == StateMachine.State.ARMED) {
+                            String sessionId = sessionManager.getCurrentSessionId();
+                            try {
+                                stateMachine.transition(StateMachine.Trigger.CLOSE, sessionId);
+                                sessionManager.endSession();
+                            } catch (StateMachine.TransitionException e) {
+                                log.warn("Janitor ARMED->Closed transition failed: {}", e.getMessage());
+                            }
+                        } else if (current == StateMachine.State.OPEN) {
                             sessionManager.resumeIdleTimer();
+                            log.info("Last dead bridge removed; idle timer resumed");
                         }
                     }
                 }

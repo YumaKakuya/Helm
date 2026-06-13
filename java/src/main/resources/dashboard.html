@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCPHUB Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",monospace;background:#0d1117;color:#c9d1d9;padding:20px}
+h1{font-size:20px;margin-bottom:4px;color:#58a6ff}
+h2{font-size:14px;margin-bottom:8px;color:#8b949e}
+.sub{font-size:12px;color:#484f58;margin-bottom:20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px}
+.card{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:14px}
+.card .label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px}
+.card .value{font-size:28px;font-weight:600;color:#e6edf3;margin:2px 0}
+.card .hint{font-size:11px;color:#484f58}
+.panel{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:16px;margin-bottom:16px}
+.panel h3{font-size:13px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.panel h3 .actions{margin-left:auto;display:flex;gap:6px}
+.bar-row{display:flex;align-items:center;margin-bottom:4px;font-size:12px}
+.bar-label{width:180px;text-align:right;padding-right:8px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-track{flex:1;height:18px;background:#21262d;border-radius:3px;overflow:hidden;position:relative}
+.bar-fill{height:100%;background:#58a6ff;border-radius:3px;min-width:2px;transition:width 0.3s}
+.bar-count{width:50px;text-align:right;padding-left:8px;color:#c9d1d9;font-size:11px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #21262d}
+th{color:#8b949e;font-weight:600}
+td{color:#c9d1d9}
+.loading{color:#8b949e;font-style:italic;padding:20px}
+.error{color:#f85149;padding:20px;font-size:12px}
+.tier-poor{color:#f85149}.tier-fair{color:#d29922}.tier-good{color:#3fb950}.tier-great{color:#58a6ff}
+.btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer}
+.btn:hover{background:#30363d;border-color:#58a6ff}
+.btn.danger{color:#f85149;border-color:#f8514933}
+.btn.danger:hover{background:#f8514920;border-color:#f85149}
+.status-running{color:#3fb950}.status-stopped{color:#8b949e}.status-unavailable{color:#f85149}
+.log-entry{font-size:11px;padding:4px 8px;border-bottom:1px solid #21262d;display:flex;gap:12px;align-items:center}
+.log-entry:hover{background:#1c2128}
+.log-ts{color:#484f58;min-width:140px;white-space:nowrap}
+.log-tool{color:#58a6ff;min-width:120px}
+.log-decision{min-width:50px}
+.log-latency{color:#8b949e;min-width:60px}
+.log-error{color:#f85149;min-width:120px;font-size:10px}
+.log-ok{color:#3fb950}
+.log-warn{color:#d29922}
+.tab-bar{display:flex;gap:8px;margin-bottom:12px}
+.tab{background:#21262d;border:1px solid #30363d;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;color:#8b949e}
+.tab.active{background:#1f6feb33;border-color:#58a6ff;color:#58a6ff}
+.tab:hover{border-color:#8b949e}
+.token{font-family:monospace;font-size:10px;color:#484f58;background:#0d1117;padding:1px 4px;border-radius:2px}
+</style>
+</head>
+<body>
+<h1>MCPHUB Dashboard</h1>
+<p class="sub" id="subtitle">Loading metrics...</p>
+
+<div class="grid" id="summary"></div>
+
+<div class="tab-bar">
+  <span class="tab active" onclick="switchTab('overview')">Overview</span>
+  <span class="tab" onclick="switchTab('providers')">Providers</span>
+  <span class="tab" onclick="switchTab('logtail')">Log Tail</span>
+  <span class="tab" onclick="switchTab('errors')">Errors</span>
+</div>
+
+<div id="tab-overview">
+  <div class="panel">
+    <h3>&#x1F4CA; Tool Call Frequency (all time)</h3>
+    <div id="tool-chart"><p class="loading">Loading...</p></div>
+  </div>
+  <div class="panel">
+    <h3>&#x1F4C5; Recent Sessions</h3>
+    <div id="sessions"><p class="loading">Loading...</p></div>
+  </div>
+  <div class="panel">
+    <h3>&#x1F4A0; Body Budget Tiers</h3>
+    <div id="budget"><p class="loading">Loading...</p></div>
+  </div>
+</div>
+
+<div id="tab-providers" style="display:none">
+  <div class="panel">
+    <h3>&#x2699;&#xFE0F; Provider Health <span class="actions"><button class="btn" onclick="loadProviders()">Refresh</button></span></h3>
+    <div id="providers"><p class="loading">Loading...</p></div>
+  </div>
+</div>
+
+<div id="tab-logtail" style="display:none">
+  <div class="panel">
+    <h3>&#x1F4C4; Recent Tool Calls (Route Log Tail) <span class="actions"><button class="btn" onclick="loadLogTail()">Refresh</button></span></h3>
+    <div id="logtail"><p class="loading">Loading...</p></div>
+  </div>
+</div>
+
+<div id="tab-errors" style="display:none">
+  <div class="panel">
+    <h3>&#x26A0;&#xFE0F; Error Breakdown</h3>
+    <div id="errors"><p class="loading">Loading...</p></div>
+  </div>
+</div>
+
+<script>
+const BASE = window.location.origin;
+let refreshTimer = null;
+
+async function fetchJSON(path, opts) {
+  const r = await fetch(BASE + path, opts || {});
+  if (!r.ok) throw new Error(r.status + ': ' + (await r.text()).slice(0,100));
+  return r.json();
+}
+
+function kb(bytes) { return (bytes/1024).toFixed(1) + ' KB'; }
+function mb(bytes) { return (bytes/1024/1024).toFixed(1) + ' MB'; }
+function num(n) { return n.toLocaleString(); }
+
+function tierClass(tier) {
+  if (!tier) return '';
+  const t = tier.toLowerCase();
+  if (t.includes('poor') || t.includes('minimal')) return 'tier-poor';
+  if (t.includes('fair')) return 'tier-fair';
+  if (t.includes('good')) return 'tier-good';
+  if (t.includes('great') || t.includes('excellent')) return 'tier-great';
+  return '';
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('[id^="tab-"]').forEach(d => d.style.display = 'none');
+  document.querySelector('.tab-bar .tab:nth-child(' +
+    (name==='overview'?1:name==='providers'?2:name==='logtail'?3:4) +
+    ')').classList.add('active');
+  document.getElementById('tab-' + name).style.display = 'block';
+  if (name === 'providers') loadProviders();
+  if (name === 'logtail') loadLogTail();
+  if (name === 'errors') loadErrors();
+}
+
+async function restartProvider(group) {
+  try {
+    await fetchJSON('/api/providers/restart?group=' + encodeURIComponent(group),
+      {method:'POST'});
+    setTimeout(loadProviders, 1500);
+  } catch(e) {
+    alert('Restart failed: ' + e.message);
+  }
+}
+
+async function loadProviders() {
+  try {
+    const p = await fetchJSON('/api/providers');
+    const s = await fetchJSON('/api/state');
+    document.getElementById('providers').innerHTML =
+      '<div style="margin-bottom:10px;font-size:12px;color:#8b949e">' +
+      'Daemon state: <span class="' + (
+        s.state==='OPEN'?'status-running':s.state==='CLOSED'||s.state==='ARMED'?'status-stopped':'status-unavailable'
+      ) + '">' + s.state + '</span>' +
+      '&nbsp;|&nbsp;Loaded: ' + s.capabilitiesLoaded + ' caps' +
+      '&nbsp;|&nbsp;Running: ' + p.running + '/' + p.total +
+      '</div>' +
+      '<table><thead><tr><th>Group</th><th>Status</th><th>Running</th><th>Actions</th></tr></thead><tbody>' +
+      p.providers.map(g =>
+        '<tr>' +
+        '<td>' + g.group + '</td>' +
+        '<td class="status-' + g.status + '">' + g.status + '</td>' +
+        '<td>' + (g.running ? '&#x2705;' : '&#x274C;') + '</td>' +
+        '<td><button class="btn danger" onclick="restartProvider(\'' + g.group + '\')">Restart</button></td>' +
+        '</tr>'
+      ).join('') +
+      '</tbody></table>';
+  } catch(e) {
+    document.getElementById('providers').innerHTML = '<p class="error">' + e.message + '</p>';
+  }
+}
+
+async function loadLogTail() {
+  try {
+    const entries = await fetchJSON('/api/logs/tail?lines=100');
+    document.getElementById('logtail').innerHTML = entries.length === 0
+      ? '<p class="loading">No log entries yet.</p>'
+      : entries.map(e => {
+          const errClass = e.error ? 'log-error' : e.decision === 'error' ? 'log-warn' : 'log-ok';
+          const errText = e.error ? '[' + e.error + ']' : '';
+          return '<div class="log-entry">' +
+            '<span class="log-ts">' + (e.ts||'').replace('T',' ').slice(0,19) + '</span>' +
+            '<span class="log-tool">' + e.tool + '</span>' +
+            '<span class="token">' + e.provider + '</span>' +
+            '<span class="log-decision ' + errClass + '">' + e.decision + '</span>' +
+            '<span class="log-latency">' + e.latencyMs + 'ms</span>' +
+            '<span class="log-error">' + errText + '</span>' +
+            '<span class="token">' + e.sessionId + '</span>' +
+            '<span class="token">' + e.client + '</span>' +
+            '</div>';
+        }).join('');
+  } catch(e) {
+    document.getElementById('logtail').innerHTML = '<p class="error">' + e.message + '</p>';
+  }
+}
+
+async function loadErrors() {
+  try {
+    const report = await fetchJSON('/api/errors');
+    const toolRows = report.perTool.map(e =>
+      '<tr><td>' + e.tool + '</td><td><span class="token">' + e.errorCode + '</span></td><td>' + e.count + '</td></tr>'
+    ).join('');
+    const recentRows = (report.recentErrors || []).map(e =>
+      '<tr><td>' + (e.ts||'').replace('T',' ').slice(0,19) + '</td><td>' + e.tool +
+      '</td><td><span class="token" style="color:#f85149">' + e.error + '</span></td>' +
+      '<td>' + e.decision + '</td><td>' + e.provider + '</td><td>' + e.sessionId + '</td></tr>'
+    ).join('');
+    document.getElementById('errors').innerHTML =
+      '<div style="margin-bottom:10px;font-size:12px;color:#8b949e">' +
+      'Total errors: <span style="color:#f85149">' + num(report.totalErrors) + '</span>' +
+      '&nbsp;|&nbsp;Affected tools: ' + report.affectedTools +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">' +
+      '<div><h4 style="font-size:12px;color:#8b949e;margin-bottom:6px">Per Tool</h4>' +
+      (toolRows ? '<table><thead><tr><th>Tool</th><th>Error Code</th><th>Count</th></tr></thead><tbody>' + toolRows + '</tbody></table>' : '<p class="loading">No errors</p>') +
+      '</div>' +
+      '<div><h4 style="font-size:12px;color:#8b949e;margin-bottom:6px">Recent</h4>' +
+      (recentRows ? '<table><thead><tr><th>Time</th><th>Tool</th><th>Error</th><th>Decision</th><th>Provider</th><th>Session</th></tr></thead><tbody>' + recentRows + '</tbody></table>' : '<p class="loading">No recent errors</p>') +
+      '</div></div>';
+  } catch(e) {
+    document.getElementById('errors').innerHTML = '<p class="error">' + e.message + '</p>';
+  }
+}
+
+async function load() {
+  try {
+    const s = await fetchJSON('/api/summary');
+    document.getElementById('subtitle').textContent =
+      'Local dashboard — ' + num(s.totalSessions) + ' sessions, ' + num(s.totalCalls) + ' tool calls recorded';
+    document.getElementById('summary').innerHTML =
+      '<div class="card"><div class="label">Total Sessions</div><div class="value">'+num(s.totalSessions)+'</div><div class="hint">'+s.sessions24h+' in last 24h</div></div>' +
+      '<div class="card"><div class="label">Tool Calls</div><div class="value">'+num(s.totalCalls)+'</div><div class="hint">'+s.calls24h+' in last 24h</div></div>' +
+      '<div class="card"><div class="label">Avg Latency</div><div class="value">'+s.avgLatencyMs+'ms</div><div class="hint">'+s.errorCalls+' errors ('+(s.totalCalls>0 ? (s.errorCalls/s.totalCalls*100).toFixed(1) : 0)+'%)</div></div>' +
+      '<div class="card"><div class="label">Total Request</div><div class="value">'+mb(s.totalRequestBytes)+'</div><div class="hint">Response: '+mb(s.totalResponseBytes)+'</div></div>';
+
+    const tools = await fetchJSON('/api/tool-stats');
+    const max = tools.length > 0 ? tools[0].count : 1;
+    document.getElementById('tool-chart').innerHTML = tools.length === 0
+      ? '<p class="loading">No tool call data yet.</p>'
+      : tools.map(t => {
+          const pct = (t.count / max * 100).toFixed(1);
+          const errInfo = t.errors > 0 ? ' <span style="color:#f85149">'+t.errors+' err</span>' : '';
+          return '<div class="bar-row">' +
+            '<div class="bar-label" title="'+t.name+'">'+t.name+'</div>' +
+            '<div class="bar-track"><div class="bar-fill" style="width:'+pct+'%"></div></div>' +
+            '<div class="bar-count">'+num(t.count)+' <span style="color:#484f58">'+t.avgMs+'ms</span>'+errInfo+'</div>' +
+            '</div>';
+        }).join('');
+
+    const sessions = await fetchJSON('/api/sessions');
+    const stateChanges = sessions.filter(s => s.event === 'state_change');
+    document.getElementById('sessions').innerHTML = stateChanges.length === 0
+      ? '<p class="loading">No session data yet.</p>'
+      : '<table><thead><tr><th>Time</th><th>Session ID</th><th>Transition</th><th>Tool Calls</th></tr></thead><tbody>' +
+        stateChanges.slice(0, 30).map(s => '<tr>' +
+          '<td>'+s.timestamp.replace('T',' ').slice(0,19)+'</td>' +
+          '<td style="font-size:11px;color:#484f58">'+s.sessionId.slice(0,8)+'...</td>' +
+          '<td>'+s.fromState+' &rarr; '+s.toState+'</td>' +
+          '<td>'+s.toolCalls+'</td>' +
+        '</tr>').join('') + '</tbody></table>';
+
+    const budget = await fetchJSON('/api/budget');
+    document.getElementById('budget').innerHTML = budget.length === 0
+      ? '<p class="loading">No body budget data yet.</p>'
+      : '<table><thead><tr><th>Time</th><th>Session</th><th>Tier</th><th>Inline Tools</th><th>MCPHUB Tools</th><th>Request Body</th></tr></thead><tbody>' +
+        budget.slice(0, 20).map(b => '<tr>' +
+          '<td>'+b.timestamp.replace('T',' ').slice(0,19)+'</td>' +
+          '<td style="font-size:11px;color:#484f58">'+(b.sessionId||'-').slice(0,8)+'</td>' +
+          '<td class="'+tierClass(b.effectiveTier)+'">'+b.effectiveTier+'</td>' +
+          '<td>'+b.inlineBuiltinCount+'</td>' +
+          '<td>'+b.mcphubHostedCount+'</td>' +
+          '<td>'+kb(b.requestBodyBytes)+'</td>' +
+        '</tr>').join('') + '</tbody></table>';
+
+  } catch(e) {
+    document.getElementById('summary').innerHTML = '<div class="card"><div class="value" style="color:#f85149">Error</div><div class="hint">'+e.message+'</div></div>';
+  }
+}
+
+load();
+</script>
+</body>
+</html>

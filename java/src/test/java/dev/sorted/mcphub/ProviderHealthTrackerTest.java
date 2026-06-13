@@ -103,6 +103,14 @@ class ProviderHealthTrackerTest {
     }
 
     @Test
+    void healthForTool_mapsRuntimeRelayTools() {
+        tracker.updateGroup("verdict", "running");
+        tracker.mapTools("verdict", java.util.List.of("test_provider_health", "test_browser_operate"));
+        assertEquals("running", tracker.healthForTool("test_provider_health"));
+        assertEquals("running", tracker.healthForTool("test_browser_operate"));
+    }
+
+    @Test
     void healthForTool_nullToolName_returnsUnavailable() {
         // Must not crash
         assertEquals("unavailable", tracker.healthForTool(null));

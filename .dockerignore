@@ -1,0 +1,16 @@
+.git
+.github
+git-backup-*
+docs
+briefs
+*.md
+!README.md
+java/build
+java/.gradle
+adapters/node_modules
+adapters/dist
+dist
+*.db
+*.sqlite
+*.log
+.env*

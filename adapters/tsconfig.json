@@ -10,5 +10,5 @@
     "resolveJsonModule": true,
     "skipLibCheck": true
   },
-  "include": ["web/**/*", "edit/**/*", "project/**/*", "session/**/*", "synthetic/**/*"]
+  "include": ["web/**/*", "edit/**/*", "project/**/*", "session/**/*", "synthetic/**/*", "nexus/**/*"]
 }

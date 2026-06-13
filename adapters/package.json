@@ -7,10 +7,14 @@
     "web": "node dist/web/index.js",
     "edit": "node dist/edit/index.js",
     "project": "node dist/project/index.js",
-    "session": "node dist/session/index.js"
+    "session": "node dist/session/index.js",
+    "nexus": "node dist/nexus/index.js"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "typescript-language-server": "^5.1.3"
   }
 }

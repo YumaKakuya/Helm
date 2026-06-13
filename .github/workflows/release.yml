@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build (for example: v0.2.1-relpipe-test)'
+        required: true
+        type: string
+      product_name:
+        description: 'Product/archive binary name'
+        required: false
+        default: mcphub
+        type: string
+      prerelease:
+        description: 'Mark the GitHub Release as a prerelease'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release assets
+    runs-on: ubuntu-latest
+    env:
+      PRODUCT_NAME: ${{ inputs.product_name || 'mcphub' }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: adapters/package-lock.json
+
+      - name: Derive release version
+        id: release_meta
+        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release archives
+        run: make release VERSION="${{ steps.release_meta.outputs.version }}" PRODUCT_NAME="$PRODUCT_NAME"
+
+      - name: Verify release artifact manifest
+        run: |
+          set -euo pipefail
+          cd dist/release
+          expected=(
+            "${PRODUCT_NAME}-${{ steps.release_meta.outputs.version }}-linux-amd64.tar.gz"
+            "${PRODUCT_NAME}-${{ steps.release_meta.outputs.version }}-darwin-amd64.tar.gz"
+            "${PRODUCT_NAME}-${{ steps.release_meta.outputs.version }}-darwin-arm64.tar.gz"
+            "sha256sums.txt"
+          )
+          for file in "${expected[@]}"; do
+            test -f "$file" || { echo "missing release asset: $file"; exit 1; }
+          done
+          actual_tar_count=$(ls "${PRODUCT_NAME}-${{ steps.release_meta.outputs.version }}"-*.tar.gz | wc -l | tr -d ' ')
+          test "$actual_tar_count" = "3" || { echo "expected 3 tar.gz assets, got $actual_tar_count"; exit 1; }
+          sha256sum -c sha256sums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ inputs.prerelease || contains(env.RELEASE_TAG, '-') }}
+          files: |
+            dist/release/${{ env.PRODUCT_NAME }}-${{ steps.release_meta.outputs.version }}-*.tar.gz
+            dist/release/sha256sums.txt

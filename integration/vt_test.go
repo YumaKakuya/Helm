@@ -19,8 +19,9 @@ var mcphubRoutingFailureCodes = map[string]struct{}{
 	"tool_not_found":       {},
 	"tool_denied":          {},
 	"provider_unreachable": {},
-	"provider_error":       {},
 	"internal_error":       {},
+	// NOTE: provider_error is intentionally excluded — it represents downstream
+	// provider execution failure, not a hub routing or state machine failure.
 }
 
 var vtTools = []struct {
@@ -53,9 +54,6 @@ func findRepoRoot(t *testing.T) string {
 
 func ensureJavaJar(t *testing.T, repoRoot string) {
 	t.Helper()
-	if jars, _ := filepath.Glob(filepath.Join(repoRoot, "java", "build", "libs", "*.jar")); len(jars) > 0 {
-		return
-	}
 	cmd := exec.Command("./gradlew", "jar")
 	cmd.Dir = filepath.Join(repoRoot, "java")
 	out, err := cmd.CombinedOutput()
@@ -635,7 +633,7 @@ func TestVT_019_IdleTimeoutAutoClose(t *testing.T) {
 	}
 }
 
-func TestVT_020_ParentExitAutoClose(t *testing.T) {
+func TestVT_020_ParentExitResumesIdleAutoClose(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration VT test in short mode")
 	}
@@ -643,10 +641,39 @@ func TestVT_020_ParentExitAutoClose(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	ensureJavaJar(t, repoRoot)
 	binPath := buildBinary(t, repoRoot)
-	sockPath, dataDir, cleanup := startDaemon(t, binPath, repoRoot)
-	defer cleanup()
+	dataDir := t.TempDir()
+
+	configPath := filepath.Join(dataDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("session:\n  idle_timeout_seconds: 3\n  armed_timeout_seconds: 3\n"), 0644); err != nil {
+		t.Fatalf("VT-020: write config.yaml: %v", err)
+	}
+
+	sockPath := filepath.Join(t.TempDir(), "mcphub.sock")
+	homeDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, binPath, "_daemon")
+	cmd.Env = append(os.Environ(),
+		"MCPHUB_SOCKET_PATH="+sockPath,
+		"MCPHUB_DATA_DIR="+dataDir,
+		"MCPHUB_ADAPTER_DIR="+filepath.Join(repoRoot, "adapters", "dist"),
+		"HOME="+homeDir,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("VT-020: daemon start failed: %v", err)
+	}
+	defer func() {
+		cancel()
+		_ = cmd.Wait()
+	}()
+
+	waitForSocketVT(t, sockPath)
 
 	armAndOpen(t, sockPath)
+	if got := statusState(t, sockPath); got != "OPEN" {
+		t.Fatalf("VT-020: expected OPEN before bridge exit probe, got %s", got)
+	}
 
 	bridge := exec.Command(binPath, "bridge")
 	bridge.Env = append(os.Environ(), "MCPHUB_SOCKET_PATH="+sockPath)
@@ -671,13 +698,19 @@ func TestVT_020_ParentExitAutoClose(t *testing.T) {
 		t.Fatalf("VT-020: bridge wait failed: %v", err)
 	}
 
-	waitForState(t, sockPath, "CLOSED", 4*time.Second)
+	if got := statusState(t, sockPath); got != "OPEN" {
+		t.Fatalf("VT-020: expected OPEN immediately after bridge exit, got %s", got)
+	}
+	time.Sleep(6 * time.Second)
+	if got := statusState(t, sockPath); got != "CLOSED" {
+		t.Fatalf("VT-020: expected CLOSED after resumed idle timeout, got %s", got)
+	}
 
 	transitions := readStateTransitions(t, dataDir)
 	t.Logf("VT-020: recorded transitions: %v", transitions)
 	joined := strings.Join(transitions, ",")
 	if !strings.Contains(joined, "COOLING_DOWN") || !strings.Contains(joined, "CLOSED") {
-		t.Fatalf("VT-020: expected COOLING_DOWN and CLOSED transitions after bridge exit, got %v", transitions)
+		t.Fatalf("VT-020: expected COOLING_DOWN and CLOSED transitions after resumed idle timeout, got %v", transitions)
 	}
 }
 
@@ -731,8 +764,14 @@ func TestVT_020a_ArmedTimeoutAutoClose(t *testing.T) {
 	}
 }
 
-// TestSessionOpenRecoveryTool verifies the AI-facing recovery path for closed sessions.
-func TestSessionOpenRecoveryTool(t *testing.T) {
+// TestNewToolSurface_SessionRecovery verifies:
+// - Closed session returns session_not_open with mcphub.session.open recovery path
+// - mcphub.session.open works to recover
+// - nexus_issue_list works in OPEN state
+// - task_list works in OPEN state
+// - mcphub_checkpoint works in OPEN state
+// - apply_patch works in OPEN state
+func TestNewToolSurface_SessionRecovery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
@@ -743,6 +782,7 @@ func TestSessionOpenRecoveryTool(t *testing.T) {
 	sockPath, _, cleanup := startDaemon(t, binPath, repoRoot)
 	defer cleanup()
 
+	// --- CLOSED state: tools/list shows only mcphub.session.open ---
 	t.Run("closed_tools_list_shows_session_open_only", func(t *testing.T) {
 		result, rpcErr := call(t, sockPath, "tools/list", nil)
 		if rpcErr != nil {
@@ -764,8 +804,12 @@ func TestSessionOpenRecoveryTool(t *testing.T) {
 		}
 	})
 
-	t.Run("closed_tool_call_returns_actionable_recovery", func(t *testing.T) {
-		params := map[string]interface{}{"name": "webfetch", "arguments": map[string]interface{}{"url": "https://example.com"}}
+	// --- CLOSED state: nexus_issue_list returns session_not_open with actionable recovery ---
+	t.Run("closed_nexus_returns_session_not_open_with_recovery", func(t *testing.T) {
+		params := map[string]interface{}{
+			"name":      "nexus_issue_list",
+			"arguments": map[string]interface{}{"project": "testproj"},
+		}
 		result, rpcErr := call(t, sockPath, "tools/call", params)
 		if rpcErr != nil {
 			t.Fatalf("tools/call RPC error: %d %s", rpcErr.Code, rpcErr.Message)
@@ -781,20 +825,26 @@ func TestSessionOpenRecoveryTool(t *testing.T) {
 		if !ok || len(contentArr) == 0 {
 			t.Fatalf("expected content array, got %v", out["content"])
 		}
-		textContent, ok := contentArr[0].(map[string]interface{})["text"].(string)
-		if !ok {
-			t.Fatalf("content[0].text not a string: %T", contentArr[0])
-		}
+		textContent := contentArr[0].(map[string]interface{})["text"].(string)
+		// Verify actionable recovery: must mention mcphub.session.open
 		if !strings.Contains(textContent, "mcphub.session.open") {
-			t.Errorf("error must mention mcphub.session.open, got: %s", textContent)
+			t.Errorf("session_not_open error must mention mcphub.session.open for actionable recovery, got: %s", textContent)
 		}
-		if !strings.Contains(textContent, "call_mcphub_session_open") {
-			t.Errorf("error must include call_mcphub_session_open next_action, got: %s", textContent)
+		if !strings.Contains(textContent, "cli_recovery_command:") || !strings.Contains(textContent, "mcphub open") {
+			t.Errorf("session_not_open error must include exact CLI recovery command for clients that cannot call mcphub.session.open, got: %s", textContent)
+		}
+		// Verify next_action is not just "wait_session"
+		if strings.Contains(textContent, "wait_session") && !strings.Contains(textContent, "mcphub.session.open") {
+			t.Errorf("session_not_open error with wait_session alone (no actionable path) is not acceptable, got: %s", textContent)
 		}
 	})
 
+	// --- Open session via mcphub.session.open ---
 	t.Run("session_open_recovers", func(t *testing.T) {
-		params := map[string]interface{}{"name": "mcphub.session.open", "arguments": map[string]interface{}{}}
+		params := map[string]interface{}{
+			"name":      "mcphub.session.open",
+			"arguments": map[string]interface{}{},
+		}
 		result, rpcErr := call(t, sockPath, "tools/call", params)
 		if rpcErr != nil {
 			t.Fatalf("mcphub.session.open RPC error: %d %s", rpcErr.Code, rpcErr.Message)
@@ -803,16 +853,121 @@ func TestSessionOpenRecoveryTool(t *testing.T) {
 		if err := json.Unmarshal(result, &out); err != nil {
 			t.Fatalf("unmarshal session.open result: %v", err)
 		}
-		if isError, _ := out["isError"].(bool); isError {
-			t.Fatalf("mcphub.session.open should not return an error: %v", out)
+		contentArr, ok := out["content"].([]interface{})
+		if !ok || len(contentArr) == 0 {
+			t.Fatalf("expected content in session.open result, got %v", out)
+		}
+		textContent := contentArr[0].(map[string]interface{})["text"].(string)
+		if !strings.Contains(textContent, "OPEN") {
+			t.Fatalf("expected OPEN state in session.open response, got: %s", textContent)
 		}
 	})
 
+	// Wait for adapter registration
 	time.Sleep(2 * time.Second)
-	if got := statusState(t, sockPath); got != "OPEN" {
-		t.Fatalf("expected OPEN after recovery, got %s", got)
-	}
 
+	// --- OPEN state: nexus_issue_list works ---
+	t.Run("open_nexus_issue_list_works", func(t *testing.T) {
+		params := map[string]interface{}{
+			"name":      "nexus_issue_list",
+			"arguments": map[string]interface{}{"project": "testproj"},
+		}
+		result, rpcErr := call(t, sockPath, "tools/call", params)
+		if rpcErr != nil {
+			t.Fatalf("nexus_issue_list RPC error: %d %s", rpcErr.Code, rpcErr.Message)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(result, &out); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		// Should not be an error
+		if isError, _ := out["isError"].(bool); isError {
+			contentArr, _ := out["content"].([]interface{})
+			if len(contentArr) > 0 {
+				t.Fatalf("nexus_issue_list failed in OPEN state: %v", contentArr[0])
+			}
+		}
+		if out["content"] == nil {
+			t.Fatalf("nexus_issue_list returned no content")
+		}
+	})
+
+	// --- OPEN state: task_list works ---
+	t.Run("open_task_list_works", func(t *testing.T) {
+		params := map[string]interface{}{
+			"name":      "task_list",
+			"arguments": map[string]interface{}{"status": "all"},
+		}
+		result, rpcErr := call(t, sockPath, "tools/call", params)
+		if rpcErr != nil {
+			t.Fatalf("task_list RPC error: %d %s", rpcErr.Code, rpcErr.Message)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(result, &out); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("task_list should succeed in OPEN state")
+		}
+		if out["content"] == nil {
+			t.Fatalf("task_list returned no content")
+		}
+	})
+
+	// --- OPEN state: mcphub_checkpoint works ---
+	t.Run("open_checkpoint_works", func(t *testing.T) {
+		params := map[string]interface{}{
+			"name":      "mcphub_checkpoint",
+			"arguments": map[string]interface{}{"message": "Test checkpoint from integration", "project": "testproj"},
+		}
+		result, rpcErr := call(t, sockPath, "tools/call", params)
+		if rpcErr != nil {
+			t.Fatalf("mcphub_checkpoint RPC error: %d %s", rpcErr.Code, rpcErr.Message)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(result, &out); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("mcphub_checkpoint should succeed in OPEN state")
+		}
+		contentArr, ok := out["content"].([]interface{})
+		if !ok || len(contentArr) == 0 {
+			t.Fatalf("mcphub_checkpoint returned no content")
+		}
+		textContent := contentArr[0].(map[string]interface{})["text"].(string)
+		if !strings.Contains(textContent, "checkpoint_time") {
+			t.Errorf("mcphub_checkpoint response should contain checkpoint_time, got: %s", textContent[:200])
+		}
+	})
+
+	// --- OPEN state: apply_patch still works ---
+	t.Run("open_apply_patch_works", func(t *testing.T) {
+		tmpPatch := "--- /dev/null\n+++ b/vt_surface_test.txt\n@@ -0,0 +1 @@\n+surface-test\n"
+		params := map[string]interface{}{
+			"name":      "apply_patch",
+			"arguments": map[string]interface{}{"patch": tmpPatch, "cwd": "/tmp"},
+		}
+		result, rpcErr := call(t, sockPath, "tools/call", params)
+		if rpcErr != nil {
+			t.Fatalf("apply_patch RPC error: %d %s", rpcErr.Code, rpcErr.Message)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(result, &out); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		// apply_patch can succeed or fail depending on patch state; just verify it was routed
+		if errorCode, ok := out["error_code"].(string); ok {
+			if _, blocked := mcphubRoutingFailureCodes[errorCode]; blocked {
+				t.Fatalf("apply_patch routing failure: %v", out)
+			}
+		}
+		if out["content"] == nil {
+			t.Fatalf("apply_patch returned no content")
+		}
+	})
+
+	// Close
 	closeSession(t, sockPath)
 }
 
@@ -859,11 +1014,13 @@ func TestApplyPatch_Classifications(t *testing.T) {
 			isError:        false,
 		},
 		{
-			name:           "plain_headers_detected",
+			// Plain headers are now auto-detected and applied with patch -p0.
+			// file.txt does not exist in scratchDir, so patch will report can't find file.
+			name:           "plain_headers_p0_file_not_found",
 			patchContent:   "--- file.txt\n+++ file.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n",
 			cwd:            scratchDir,
-			wantText:       "git-style",
-			wantNextAction: "abort",
+			wantText:       "Cannot find file",
+			wantNextAction: "disambiguate",
 			isError:        true,
 		},
 		{
@@ -880,6 +1037,38 @@ func TestApplyPatch_Classifications(t *testing.T) {
 			cwd:            scratchDir,
 			wantText:       "hunk(s) failed",
 			wantNextAction: "retry",
+			isError:        true,
+		},
+		{
+			// QA-F5: plain unified diff with ../escape path — preflight must reject before invoking patch.
+			// wantText is specific to the safety error, not just "abort".
+			name:           "plain_traversal_preflight_rejected",
+			patchContent:   "--- ../escape.txt\n+++ ../escape.txt\n@@ -1,1 +1,1 @@\n-x\n+y\n",
+			cwd:            scratchDir,
+			wantText:       "Unsafe path",
+			wantNextAction: "abort",
+			isError:        true,
+		},
+		{
+			// QA-F5: git-style unified diff with a/../escape path — strip first component leaves
+			// ../escape which must be rejected by preflight path validation.
+			// wantText is specific to the safety error, not just "abort".
+			name:           "git_traversal_preflight_rejected",
+			patchContent:   "--- a/../escape.txt\n+++ b/../escape.txt\n@@ -1,1 +1,1 @@\n-x\n+y\n",
+			cwd:            scratchDir,
+			wantText:       "Unsafe path",
+			wantNextAction: "abort",
+			isError:        true,
+		},
+		{
+			// QA-Fix1: mixed git-style and plain-style headers in same patch — must reject without
+			// invoking patch at a wrong strip level.
+			name: "mixed_unified_diff_headers_rejected",
+			patchContent: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-x\n+y\n" +
+				"--- bar.txt\n+++ bar.txt\n@@ -1 +1 @@\n-a\n+b\n",
+			cwd:            scratchDir,
+			wantText:       "mixed",
+			wantNextAction: "abort",
 			isError:        true,
 		},
 	}
@@ -939,4 +1128,509 @@ func TestApplyPatch_Classifications(t *testing.T) {
 	}
 
 	_ = os.Remove(filepath.Join(scratchDir, "success_test.txt"))
+}
+
+// TestApplyPatch_BeginPatch verifies the OpenAI/GPT-style "*** Begin Patch" format support.
+// Tests: Add File, Update File, Delete File, context mismatch, path traversal rejection,
+// plain unified diff (-p0), and git-style unified diff regression — all direct-to-adapter.
+func TestApplyPatch_BeginPatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	repoRoot := findRepoRoot(t)
+	ensureJavaJar(t, repoRoot)
+	binPath := buildBinary(t, repoRoot)
+	sockPath, _, cleanup := startDaemon(t, binPath, repoRoot)
+	defer cleanup()
+
+	armAndOpen(t, sockPath)
+	defer closeSession(t, sockPath)
+
+	scratchDir := t.TempDir()
+
+	callApplyPatch := func(t *testing.T, patchContent, cwd string) map[string]interface{} {
+		t.Helper()
+		params := map[string]interface{}{
+			"name":      "apply_patch",
+			"arguments": map[string]interface{}{"patch": patchContent, "cwd": cwd},
+		}
+		result, rpcErr := call(t, sockPath, "tools/call", params)
+		if rpcErr != nil {
+			t.Fatalf("RPC error: %d %s", rpcErr.Code, rpcErr.Message)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(result, &out); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		return out
+	}
+
+	getText := func(t *testing.T, out map[string]interface{}) string {
+		t.Helper()
+		contentArr, ok := out["content"].([]interface{})
+		if !ok || len(contentArr) == 0 {
+			t.Fatalf("expected content array, got %v", out)
+		}
+		text, ok := contentArr[0].(map[string]interface{})["text"].(string)
+		if !ok {
+			t.Fatalf("content[0].text not string")
+		}
+		return text
+	}
+
+	// --- Begin Patch: Add File ---
+	t.Run("begin_patch_add_file", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "bp_add.txt")
+		_ = os.Remove(targetFile) // ensure clean
+		patch := "*** Begin Patch\n*** Add File: bp_add.txt\n@@\n+line one\n+line two\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("Begin Patch Add File should succeed, got error: %s", getText(t, out))
+		}
+		got, err := os.ReadFile(targetFile)
+		if err != nil {
+			t.Fatalf("added file not found: %v", err)
+		}
+		content := string(got)
+		if !strings.Contains(content, "line one") || !strings.Contains(content, "line two") {
+			t.Errorf("added file content unexpected: %q", content)
+		}
+		_ = os.Remove(targetFile)
+	})
+
+	// --- Begin Patch: Add File already exists ---
+	t.Run("begin_patch_add_file_already_exists", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "bp_exists.txt")
+		if err := os.WriteFile(targetFile, []byte("existing\n"), 0644); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		defer os.Remove(targetFile)
+		patch := "*** Begin Patch\n*** Add File: bp_exists.txt\n@@\n+new content\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected error when Add File target already exists")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "already exists") {
+			t.Errorf("expected 'already exists' in error text, got: %s", text)
+		}
+	})
+
+	// --- Begin Patch: Update File ---
+	t.Run("begin_patch_update_file", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "bp_update.txt")
+		if err := os.WriteFile(targetFile, []byte("alpha\nbeta\ngamma\n"), 0644); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		defer os.Remove(targetFile)
+		patch := "*** Begin Patch\n*** Update File: bp_update.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("Begin Patch Update File should succeed, got error: %s", getText(t, out))
+		}
+		got, err := os.ReadFile(targetFile)
+		if err != nil {
+			t.Fatalf("updated file not readable: %v", err)
+		}
+		content := string(got)
+		if !strings.Contains(content, "BETA") || strings.Contains(content, "\nbeta\n") {
+			t.Errorf("Update File content unexpected: %q", content)
+		}
+	})
+
+	// --- Begin Patch: Delete File ---
+	t.Run("begin_patch_delete_file", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "bp_delete.txt")
+		if err := os.WriteFile(targetFile, []byte("to be deleted\n"), 0644); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		patch := "*** Begin Patch\n*** Delete File: bp_delete.txt\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("Begin Patch Delete File should succeed, got error: %s", getText(t, out))
+		}
+		if _, err := os.Stat(targetFile); !os.IsNotExist(err) {
+			t.Errorf("deleted file still exists at %s", targetFile)
+			_ = os.Remove(targetFile)
+		}
+	})
+
+	// --- Begin Patch: Delete File not found ---
+	t.Run("begin_patch_delete_file_not_found", func(t *testing.T) {
+		patch := "*** Begin Patch\n*** Delete File: bp_nonexistent.txt\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected error when Delete File target does not exist")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "does not exist") {
+			t.Errorf("expected 'does not exist' in error text, got: %s", text)
+		}
+	})
+
+	// --- Begin Patch: Context mismatch ---
+	t.Run("begin_patch_context_mismatch", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "bp_mismatch.txt")
+		if err := os.WriteFile(targetFile, []byte("lineA\nlineB\nlineC\n"), 0644); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		defer os.Remove(targetFile)
+		// Patch refers to context lines that don't match actual file content
+		patch := "*** Begin Patch\n*** Update File: bp_mismatch.txt\n@@ -1,3 +1,3 @@\n wrongCtx\n-lineB\n+LINEB\n lineC\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected error for context mismatch in Begin Patch Update File")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "Context not found") && !strings.Contains(text, "Hunk failed") && !strings.Contains(text, "hunk") {
+			t.Errorf("expected context mismatch error, got: %s", text)
+		}
+	})
+
+	// --- Begin Patch: Path traversal rejection ---
+	t.Run("begin_patch_path_traversal", func(t *testing.T) {
+		patch := "*** Begin Patch\n*** Add File: ../escape.txt\n@@\n+evil\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected path traversal to be rejected")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "..") && !strings.Contains(text, "traversal") && !strings.Contains(text, "safety") {
+			t.Errorf("expected path safety error, got: %s", text)
+		}
+	})
+
+	// --- Begin Patch: Absolute path rejection ---
+	t.Run("begin_patch_absolute_path_rejected", func(t *testing.T) {
+		patch := "*** Begin Patch\n*** Add File: /tmp/absolute_escape.txt\n@@\n+evil\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected absolute path to be rejected")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "absolute") && !strings.Contains(text, "safety") {
+			t.Errorf("expected absolute path error, got: %s", text)
+		}
+	})
+
+	// --- Plain unified diff: success with -p0 (relative paths) ---
+	t.Run("plain_unified_diff_p0_success", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "p0_target.txt")
+		if err := os.WriteFile(targetFile, []byte("hello\nworld\n"), 0644); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		defer os.Remove(targetFile)
+		// Plain header: no a/ b/ prefix — patch -p0 with relative path
+		patch := "--- p0_target.txt\n+++ p0_target.txt\n@@ -1,2 +1,2 @@\n-hello\n+HELLO\n world\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("Plain unified diff should succeed with -p0 (relative path), got error: %s", getText(t, out))
+		}
+		got, err := os.ReadFile(targetFile)
+		if err != nil {
+			t.Fatalf("target file not readable: %v", err)
+		}
+		if !strings.Contains(string(got), "HELLO") {
+			t.Errorf("expected HELLO in patched file, got: %q", string(got))
+		}
+	})
+
+	// --- Git-style unified diff: regression ---
+	t.Run("git_style_unified_diff_regression", func(t *testing.T) {
+		patch := "--- /dev/null\n+++ b/git_regression.txt\n@@ -0,0 +1 @@\n+regression-check\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("Git-style unified diff should succeed, got error: %s", getText(t, out))
+		}
+		got, err := os.ReadFile(filepath.Join(scratchDir, "git_regression.txt"))
+		if err != nil {
+			t.Fatalf("created file not found: %v", err)
+		}
+		if !strings.Contains(string(got), "regression-check") {
+			t.Errorf("expected 'regression-check' in file, got: %q", string(got))
+		}
+		_ = os.Remove(filepath.Join(scratchDir, "git_regression.txt"))
+	})
+
+	// --- F1: Begin Patch Add File without @@ header (bare + lines) ---
+	t.Run("begin_patch_add_file_no_hunk_header", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "bp_bare.txt")
+		_ = os.Remove(targetFile)
+		// GPT/OpenAI style: bare + lines, no @@ header
+		patch := "*** Begin Patch\n*** Add File: bp_bare.txt\n+line alpha\n+line beta\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("Add File bare + lines should succeed, got error: %s", getText(t, out))
+		}
+		got, err := os.ReadFile(targetFile)
+		if err != nil {
+			t.Fatalf("added file not found: %v", err)
+		}
+		content := string(got)
+		if !strings.Contains(content, "line alpha") || !strings.Contains(content, "line beta") {
+			t.Errorf("bare Add File content unexpected: %q", content)
+		}
+		_ = os.Remove(targetFile)
+	})
+
+	// --- F2: Begin Patch Update File with no hunks must fail ---
+	t.Run("begin_patch_update_file_no_hunks", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "bp_nohunks.txt")
+		if err := os.WriteFile(targetFile, []byte("data\n"), 0644); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		defer os.Remove(targetFile)
+		// Update File directive with no @@ hunk content
+		patch := "*** Begin Patch\n*** Update File: bp_nohunks.txt\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Update File with no hunks should fail, but succeeded")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "no hunks") && !strings.Contains(text, "hunk") {
+			t.Errorf("expected 'no hunks' in error, got: %s", text)
+		}
+	})
+
+	// --- F3: Missing *** End Patch marker must fail ---
+	t.Run("begin_patch_missing_end_marker", func(t *testing.T) {
+		patch := "*** Begin Patch\n*** Add File: bp_noend.txt\n+hello\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Missing End Patch should fail, but succeeded")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "End Patch") {
+			t.Errorf("expected 'End Patch' in error, got: %s", text)
+		}
+		// Ensure the file was NOT created (incomplete patch must not be applied)
+		if _, err := os.Stat(filepath.Join(scratchDir, "bp_noend.txt")); err == nil {
+			t.Errorf("file bp_noend.txt must not be created from incomplete patch")
+			_ = os.Remove(filepath.Join(scratchDir, "bp_noend.txt"))
+		}
+	})
+
+	// --- F4: Filename with .. as part of a segment (not a traversal) must be allowed ---
+	t.Run("begin_patch_dotdot_in_filename_allowed", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "version..txt")
+		_ = os.Remove(targetFile)
+		patch := "*** Begin Patch\n*** Add File: version..txt\n+v2.0\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); isError {
+			t.Fatalf("Filename 'version..txt' should be allowed, got error: %s", getText(t, out))
+		}
+		_ = os.Remove(targetFile)
+	})
+
+	// --- F6: Top-level noise in Begin Patch block must fail ---
+	t.Run("begin_patch_top_level_noise_rejected", func(t *testing.T) {
+		patch := "*** Begin Patch\nsome unexpected content\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Top-level noise in Begin Patch should fail, but succeeded")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "Unexpected") && !strings.Contains(text, "malformed") && !strings.Contains(text, "parse error") {
+			t.Errorf("expected parse error for top-level noise, got: %s", text)
+		}
+	})
+
+	// --- QA-Fix2: Begin Patch Update File with pure insertion hunk (no context) must fail ---
+	// A hunk with only + lines and no context/removal lines provides no anchor for placement.
+	// Silently appending to EOF would be incorrect behaviour for an update operation.
+	t.Run("begin_patch_update_file_pure_insertion_rejected", func(t *testing.T) {
+		targetFile := filepath.Join(scratchDir, "bp_pureins.txt")
+		originalContent := "line1\nline2\n"
+		if err := os.WriteFile(targetFile, []byte(originalContent), 0644); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		defer os.Remove(targetFile)
+		// Hunk with only + lines and no context or - lines — no anchor
+		patch := "*** Begin Patch\n*** Update File: bp_pureins.txt\n@@ -1,0 +1,1 @@\n+inserted line\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Pure insertion hunk in Update File should fail, but succeeded")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "context") && !strings.Contains(text, "insertion") {
+			t.Errorf("expected context/insertion error, got: %s", text)
+		}
+		// File must be unchanged
+		got, err := os.ReadFile(targetFile)
+		if err != nil {
+			t.Fatalf("could not read target file after rejection: %v", err)
+		}
+		if string(got) != originalContent {
+			t.Errorf("file must be unchanged after pure insertion rejection, got: %q", string(got))
+		}
+	})
+
+	// --- Atomicity: unified diff multi-file failure must rollback earlier success and artifacts ---
+	t.Run("unified_diff_multi_file_failure_rolls_back_all", func(t *testing.T) {
+		aFile := filepath.Join(scratchDir, "atomic_a.txt")
+		bFile := filepath.Join(scratchDir, "atomic_b.txt")
+		if err := os.WriteFile(aFile, []byte("alpha\n"), 0644); err != nil {
+			t.Fatalf("setup a: %v", err)
+		}
+		if err := os.WriteFile(bFile, []byte("beta\n"), 0644); err != nil {
+			t.Fatalf("setup b: %v", err)
+		}
+		defer os.Remove(aFile)
+		defer os.Remove(bFile)
+
+		patch := "--- a/atomic_a.txt\n+++ b/atomic_a.txt\n@@ -1 +1 @@\n-alpha\n+ALPHA\n" +
+			"--- a/atomic_b.txt\n+++ b/atomic_b.txt\n@@ -1 +1 @@\n-not-beta\n+BETA\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected stale second hunk to fail")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "rollback: restored pre-apply state") || !strings.Contains(text, "confirm no .rej/.orig") {
+			t.Fatalf("expected rollback and artifact verification guidance, got: %s", text)
+		}
+		gotA, err := os.ReadFile(aFile)
+		if err != nil {
+			t.Fatalf("read a after rollback: %v", err)
+		}
+		gotB, err := os.ReadFile(bFile)
+		if err != nil {
+			t.Fatalf("read b after rollback: %v", err)
+		}
+		if string(gotA) != "alpha\n" || string(gotB) != "beta\n" {
+			t.Fatalf("files must be restored after failed unified diff, got a=%q b=%q", string(gotA), string(gotB))
+		}
+		for _, suffix := range []string{".orig", ".rej"} {
+			if _, err := os.Stat(bFile + suffix); !os.IsNotExist(err) {
+				t.Fatalf("artifact %s must not remain after rollback", bFile+suffix)
+			}
+		}
+	})
+
+	// --- Atomicity: unified diff create then fail must remove created file ---
+	t.Run("unified_diff_create_then_fail_removes_created_file", func(t *testing.T) {
+		createdFile := filepath.Join(scratchDir, "atomic_created.txt")
+		bFile := filepath.Join(scratchDir, "atomic_create_b.txt")
+		_ = os.Remove(createdFile)
+		if err := os.WriteFile(bFile, []byte("beta\n"), 0644); err != nil {
+			t.Fatalf("setup b: %v", err)
+		}
+		defer os.Remove(bFile)
+
+		patch := "--- /dev/null\n+++ b/atomic_created.txt\n@@ -0,0 +1 @@\n+created\n" +
+			"--- a/atomic_create_b.txt\n+++ b/atomic_create_b.txt\n@@ -1 +1 @@\n-not-beta\n+BETA\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected stale second hunk to fail")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "rollback: restored pre-apply state") {
+			t.Fatalf("expected rollback guidance, got: %s", text)
+		}
+		if _, err := os.Stat(createdFile); !os.IsNotExist(err) {
+			t.Fatalf("created file must be removed after rollback")
+		}
+		gotB, err := os.ReadFile(bFile)
+		if err != nil {
+			t.Fatalf("read b after rollback: %v", err)
+		}
+		if string(gotB) != "beta\n" {
+			t.Fatalf("existing file must be restored after rollback, got %q", string(gotB))
+		}
+	})
+
+	// --- Atomicity: Begin Patch plan failure must leave earlier planned writes unapplied ---
+	t.Run("begin_patch_multi_op_failure_leaves_no_earlier_writes", func(t *testing.T) {
+		createdFile := filepath.Join(scratchDir, "bp_atomic_created.txt")
+		bFile := filepath.Join(scratchDir, "bp_atomic_b.txt")
+		_ = os.Remove(createdFile)
+		if err := os.WriteFile(bFile, []byte("beta\n"), 0644); err != nil {
+			t.Fatalf("setup b: %v", err)
+		}
+		defer os.Remove(bFile)
+
+		patch := "*** Begin Patch\n*** Add File: bp_atomic_created.txt\n+alpha\n*** Update File: bp_atomic_b.txt\n@@\n wrong\n-beta\n+BETA\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected Begin Patch hunk failure")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "rollback: not_needed_no_files_modified") {
+			t.Fatalf("expected no-write rollback guidance, got: %s", text)
+		}
+		if _, err := os.Stat(createdFile); !os.IsNotExist(err) {
+			t.Fatalf("Begin Patch planned Add File must not be written after later failure")
+		}
+		gotB, err := os.ReadFile(bFile)
+		if err != nil {
+			t.Fatalf("read b after Begin Patch failure: %v", err)
+		}
+		if string(gotB) != "beta\n" {
+			t.Fatalf("Begin Patch target must remain unchanged, got %q", string(gotB))
+		}
+	})
+
+	// --- Safety: symlink targets must be rejected before snapshot/rollback follows them ---
+	t.Run("unified_diff_symlink_target_rejected", func(t *testing.T) {
+		outsideDir := t.TempDir()
+		outsideFile := filepath.Join(outsideDir, "outside.txt")
+		if err := os.WriteFile(outsideFile, []byte("outside\n"), 0644); err != nil {
+			t.Fatalf("setup outside: %v", err)
+		}
+		linkFile := filepath.Join(scratchDir, "atomic_link.txt")
+		_ = os.Remove(linkFile)
+		if err := os.Symlink(outsideFile, linkFile); err != nil {
+			t.Skipf("symlink unavailable on this platform: %v", err)
+		}
+		defer os.Remove(linkFile)
+
+		patch := "--- a/atomic_link.txt\n+++ b/atomic_link.txt\n@@ -1 +1 @@\n-outside\n+changed\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected symlink patch target to be rejected")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "symlink") || !strings.Contains(text, "rollback: not_needed_no_files_modified") {
+			t.Fatalf("expected symlink rejection and no-write guidance, got: %s", text)
+		}
+		gotOutside, err := os.ReadFile(outsideFile)
+		if err != nil {
+			t.Fatalf("read outside file after rejection: %v", err)
+		}
+		if string(gotOutside) != "outside\n" {
+			t.Fatalf("outside symlink target must remain unchanged, got %q", string(gotOutside))
+		}
+	})
+
+	// --- Safety: Begin Patch must reject symlink targets during planning, before reads/writes ---
+	t.Run("begin_patch_symlink_target_rejected", func(t *testing.T) {
+		outsideDir := t.TempDir()
+		outsideFile := filepath.Join(outsideDir, "outside_begin.txt")
+		if err := os.WriteFile(outsideFile, []byte("outside\n"), 0644); err != nil {
+			t.Fatalf("setup outside: %v", err)
+		}
+		linkFile := filepath.Join(scratchDir, "bp_atomic_link.txt")
+		_ = os.Remove(linkFile)
+		if err := os.Symlink(outsideFile, linkFile); err != nil {
+			t.Skipf("symlink unavailable on this platform: %v", err)
+		}
+		defer os.Remove(linkFile)
+
+		patch := "*** Begin Patch\n*** Update File: bp_atomic_link.txt\n@@\n-outside\n+changed\n*** End Patch\n"
+		out := callApplyPatch(t, patch, scratchDir)
+		if isError, _ := out["isError"].(bool); !isError {
+			t.Fatalf("Expected Begin Patch symlink target to be rejected")
+		}
+		text := getText(t, out)
+		if !strings.Contains(text, "symlink") || !strings.Contains(text, "rollback: not_needed_no_files_modified") {
+			t.Fatalf("expected symlink rejection and no-write guidance, got: %s", text)
+		}
+		gotOutside, err := os.ReadFile(outsideFile)
+		if err != nil {
+			t.Fatalf("read outside file after Begin Patch rejection: %v", err)
+		}
+		if string(gotOutside) != "outside\n" {
+			t.Fatalf("outside Begin Patch symlink target must remain unchanged, got %q", string(gotOutside))
+		}
+	})
 }

@@ -18,7 +18,7 @@ import java.sql.*;
  */
 public class DatabaseManager implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(DatabaseManager.class);
-    private static final int ALPHA_SCHEMA_VERSION = 1;
+    private static final int ALPHA_SCHEMA_VERSION = 2;
 
     private final String dbPath;
     private Connection connection;
@@ -74,7 +74,8 @@ public class DatabaseManager implements AutoCloseable {
         int current = getCurrentSchemaVersion();
         if (current < ALPHA_SCHEMA_VERSION) {
             log.info("Running schema migration: {} -> {}", current, ALPHA_SCHEMA_VERSION);
-            migrateV1();
+            if (current < 1) migrateV1();
+            if (current < 2) migrateV2();
             setSchemaVersion(ALPHA_SCHEMA_VERSION);
             log.info("Schema migration complete. Version = {}", ALPHA_SCHEMA_VERSION);
         } else {
@@ -234,6 +235,25 @@ public class DatabaseManager implements AutoCloseable {
                 PRIMARY KEY (session_id, provider_id)
             )
         """);
+    }
+
+    // -------------------------------------------------------------------------
+    // Schema version 2 — Model analytics columns (2026-05-05)
+    // -------------------------------------------------------------------------
+
+    private void migrateV2() throws SQLException {
+        // Add client_name and client_version to route_log for model analytics
+        try (Statement st = connection.createStatement()) {
+            st.execute("ALTER TABLE route_log ADD COLUMN client_name TEXT");
+        } catch (SQLException e) {
+            if (!e.getMessage().contains("duplicate column")) throw e;
+        }
+        try (Statement st = connection.createStatement()) {
+            st.execute("ALTER TABLE route_log ADD COLUMN client_version TEXT");
+        } catch (SQLException e) {
+            if (!e.getMessage().contains("duplicate column")) throw e;
+        }
+        log.info("V2 migration complete: added client_name, client_version to route_log");
     }
 
     // -------------------------------------------------------------------------

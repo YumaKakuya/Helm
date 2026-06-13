@@ -1,7 +1,7 @@
-# Helm relay provider configuration
+# MCPHUB relay provider configuration
 # Copy to ~/.config/mcphub/relays.yaml and edit for your setup.
 #
-# Each relay entry defines an external MCP server that Helm will
+# Each relay entry defines an external MCP server that MCPHUB will
 # spawn as a subprocess and route tool calls to.
 #
 # Format:
@@ -9,7 +9,7 @@
 #     - id: "unique-relay-id"
 #       command: ["/path/to/binary", "arg1", "arg2"]
 #       tools: ["tool_name_1", "tool_name_2"]
-#       capabilities:             # optional: full capability definitions
+#       capabilities:             # required for AI-visible tools not built into MCPHUB
 #         - capability_id: "tool_name_1"
 #           display_name: "tool_name_1"
 #           provider_id: "my-provider"
@@ -33,3 +33,63 @@
 #   MCPHUB_RELAYS_PATH=/path/to/custom-relays.yaml
 
 relays: []
+
+# ---------------------------------------------------------------------------
+# Example: Verdict. test-evidence provider
+# ---------------------------------------------------------------------------
+# Verdict. exposes 15 test_* MCP tools for scenario execution, evidence
+# collection, browser automation, and database probing.
+#
+# Provider binary: /home/YOU/.local/share/verdict/current/bin/verdict-provider
+# Provider ID:     mcphub_test_evidence_provider
+#
+# Use an absolute command path. MCPHUB starts providers with Java
+# ProcessBuilder, so shell expansions like ${XDG_DATA_HOME:-...} are not
+# expanded.
+#
+# Two tools are POLICY-DENIED by default in capabilities.yaml:
+#   test_db_reset      — destructive DB baseline reset
+#   test_cleanup_reset — destructive test-environment teardown
+# To authorize them per session, add a session rule via the control API:
+#   {"action":"allow","tool_pattern":"test_db_reset","priority":9500,"scope":"session"}
+#
+# Uncomment and copy to ~/.config/mcphub/relays.yaml to activate:
+#
+# relays:
+#   - id: "mcphub_test_evidence_provider"
+#     command: ["/home/YOU/.local/share/verdict/current/bin/verdict-provider", "--stdio"]
+#     tools:
+#       - "test_provider_health"
+#       - "test_provider_capabilities"
+#       - "test_scenario_validate"
+#       - "test_scenario_plan"
+#       - "test_scenario_run"
+#       - "test_scenario_status"
+#       - "test_evidence_list"
+#       - "test_evidence_get"
+#       - "test_artifact_export"
+#       - "test_gui_operate"
+#       - "test_browser_operate"
+#       - "test_db_probe"
+#       - "test_db_reset"
+#       - "test_service_health"
+#       - "test_cleanup_reset"
+#     capabilities:
+#       # Add all 15 capability definitions with the same required fields,
+#       # preserving the frozen Verdict Spec access_class, rw_boundary, and
+#       # side_effect_class values. Mirror the installed provider's tools/list
+#       # schema exactly when provider versions add or rename input fields.
+#       # Minimally required fields per MCPHUB registry validation (V1):
+#       - capability_id: "test_provider_health"
+#         display_name: "test_provider_health"
+#         provider_id: "mcphub_test_evidence_provider"
+#         access_class: "safe"
+#         rw_boundary: "read"
+#         enabled: true
+#         priority: 10
+#         schema: { type: object }
+#         contract:
+#           purpose: "Check Verdict provider liveness and readiness status."
+#           side_effect_class: "none"
+#           timeout_hint_ms: 5000
+#       # ... repeat for remaining 14 test_* tools.

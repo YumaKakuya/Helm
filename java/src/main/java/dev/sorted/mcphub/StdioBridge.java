@@ -11,6 +11,7 @@ import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 /**
  * MCP stdio bridge: reads JSON-RPC from stdin (AI client), forwards to daemon UDS,
@@ -67,8 +68,7 @@ public class StdioBridge {
                 stdoutWriter.flush();
             } else {
                 // REQ-2.3.4: daemon unreachable
-                writeError(stdoutWriter, id, -32000,
-                        "MCPHUB daemon is not running. Start it with 'mcphub start'.");
+                writeError(stdoutWriter, id, -32000, daemonUnavailableMessage());
             }
 
             // Send bridge_attach on first successful initialize
@@ -82,7 +82,7 @@ public class StdioBridge {
 
         heartbeat.interrupt();
 
-        // REQ-2.3.5: stdin closed → bridge detaching (session stays open)
+        // REQ-2.3.5: stdin closed -> bridge detaching; session falls back to idle timeout.
         log.info("stdin closed, bridge detaching");
         sendDetach();
     }
@@ -116,6 +116,24 @@ public class StdioBridge {
             log.warn("Failed to connect to daemon: {}", e.getMessage());
             return null;
         }
+    }
+
+    static String daemonUnavailableMessage() {
+        return daemonUnavailableMessage(cliBaseCommand(System.getenv()));
+    }
+
+    static String daemonUnavailableMessage(String command) {
+        return "MCPHUB daemon is unreachable. Start the daemon, then open the session. " +
+                "cli_recovery_start_command: " + command + " start | " +
+                "cli_recovery_open_command: " + command + " open";
+    }
+
+    static String cliBaseCommand(Map<String, String> env) {
+        String command = env.get("MCPHUB_CLI_COMMAND");
+        if (command == null || command.isBlank()) {
+            return "mcphub";
+        }
+        return command;
     }
 
     /** Send bridge_attach notification to daemon. Returns true on success. */
@@ -187,7 +205,7 @@ public class StdioBridge {
         } catch (Exception e) {
             log.warn("bridge_detach notification failed: {}", e.getMessage());
         }
-        log.info("Bridge detaching (session kept open for other bridges)");
+        log.info("Bridge detaching (last bridge resumes session idle timer)");
     }
 
     private void writeParseError(PrintWriter writer, JsonNode id, String message) {

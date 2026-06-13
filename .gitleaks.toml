@@ -1,0 +1,8 @@
+title = "MCPHUB curated export gitleaks allowlist"
+
+[allowlist]
+description = "Synthetic test fixtures documented as non-real credentials."
+paths = [
+  '''java/src/test/java/dev/sorted/mcphub/SecretScannerTest\.java''',
+  '''java/src/test/java/dev/sorted/mcphub/McpHandlerTest\.java''',
+]

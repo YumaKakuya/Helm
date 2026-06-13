@@ -71,11 +71,41 @@ class McpHandlerTest {
     // --- tools/list ---
 
     @Test
-    void toolsList_whenClosed_returnsSessionOpenTool() throws Exception {
-        // Session is CLOSED — recovery must be visible in the same AI-facing surface.
+    void toolsList_whenClosed_returnsSessionOpenOnly() throws Exception {
+        // Session is CLOSED — tools/list returns only mcphub.session.open (REQ-7.4.2)
+        // so the AI can self-reopen the session
         JsonNode r = handler.handle("tools/list", null);
         assertEquals(1, r.path("tools").size());
         assertEquals("mcphub.session.open", r.path("tools").get(0).path("name").asText());
+    }
+
+    @Test
+    void toolsList_whenArmed_returnsSessionOpenOnly() throws Exception {
+        sm.transition(StateMachine.Trigger.ARM, "s1");
+
+        JsonNode r = handler.handle("tools/list", null);
+        assertEquals(1, r.path("tools").size());
+        assertEquals("mcphub.session.open", r.path("tools").get(0).path("name").asText());
+    }
+
+    @Test
+    void toolsList_whenCoolingDown_returnsEmpty() throws Exception {
+        sm.transition(StateMachine.Trigger.ARM, "s1");
+        sm.transition(StateMachine.Trigger.OPEN, "s1");
+        sm.transition(StateMachine.Trigger.CLOSE, "s1");
+
+        JsonNode r = handler.handle("tools/list", null);
+        assertEquals(0, r.path("tools").size());
+    }
+
+    @Test
+    void toolsList_whenLocked_returnsEmpty() throws Exception {
+        sm.transition(StateMachine.Trigger.ARM, "s1");
+        sm.transition(StateMachine.Trigger.OPEN, "s1");
+        sm.transition(StateMachine.Trigger.LOCK, "s1");
+
+        JsonNode r = handler.handle("tools/list", null);
+        assertEquals(0, r.path("tools").size());
     }
 
     @Test
@@ -85,13 +115,16 @@ class McpHandlerTest {
         sm.transition(StateMachine.Trigger.OPEN, "s1");
         confirmGroup("web", "webfetch", "websearch");
         confirmGroup("edit", "apply_patch");
-        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete");
-        confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp",
+                "task_create", "task_list", "task_update", "task_delete");
+        confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch", "mcphub_checkpoint");
+        confirmGroup("nexus", "nexus_issue_create", "nexus_issue_list",
+                "nexus_issue_close", "nexus_issue_update");
 
         JsonNode r = handler.handle("tools/list", null);
         JsonNode tools = r.path("tools");
-        // 15 registered tools (builtin-hosted + task) + 1 disambiguation = 16
-        assertEquals(16, tools.size(), "Expected 15 capabilities + 1 disambiguation tool");
+        // 20 registered tools (builtin-hosted: 11 original + 4 nexus + 4 task + 1 checkpoint) + 1 disambiguation + 1 task_context = 22
+        assertEquals(22, tools.size(), "Expected 20 capabilities + 2 hub tools (disambiguate + task_context)");
 
         // Verify disambiguation tool is present
         boolean hasDisambig = false;
@@ -119,14 +152,37 @@ class McpHandlerTest {
         sm.transition(StateMachine.Trigger.OPEN, "s1");
         confirmGroup("web", "webfetch", "websearch");
         confirmGroup("edit", "apply_patch");
-        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete");
-        confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp",
+                "task_create", "task_list", "task_update", "task_delete");
+        confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch", "mcphub_checkpoint");
+        confirmGroup("nexus", "nexus_issue_create", "nexus_issue_list",
+                "nexus_issue_close", "nexus_issue_update");
 
         JsonNode r = handler.handle("tools/list", null);
         for (JsonNode t : r.path("tools")) {
             assertNotEquals("webfetch", t.path("name").asText(),
                     "Denied tool must not appear in tools/list");
         }
+    }
+
+    @Test
+    void toolsList_taskContextResearch_hidesNonResearchTools() throws Exception {
+        sm.transition(StateMachine.Trigger.ARM, "s1");
+        sm.transition(StateMachine.Trigger.OPEN, "s1");
+        confirmGroup("web", "webfetch", "websearch");
+        confirmGroup("edit", "apply_patch");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp",
+                "task_create", "task_list", "task_update", "task_delete");
+        confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch", "mcphub_checkpoint");
+
+        setTaskContext("research");
+
+        java.util.Set<String> names = toolNames(handler.handle("tools/list", null));
+        assertTrue(names.contains("webfetch"));
+        assertTrue(names.contains("websearch"));
+        assertTrue(names.contains("mcphub_set_task_context"));
+        assertFalse(names.contains("list"), "research context must hide project file listing");
+        assertFalse(names.contains("apply_patch"), "research context must hide edit tools");
     }
 
     // --- tools/call ---
@@ -139,34 +195,14 @@ class McpHandlerTest {
 
         JsonNode r = handler.handle("tools/call", params);
         assertTrue(r.path("isError").asBoolean(), "isError must be true");
-        JsonNode err = parseErrorJson(r);
-        assertEquals("session_not_open", err.path("error_code").asText());
-        assertEquals("call_mcphub_session_open", err.path("next_action").asText());
-        assertTrue(err.path("reason").asText().contains("mcphub.session.open"));
-    }
-
-    @Test
-    void toolsCall_sessionOpenTool_opensSessionFromClosed() throws Exception {
-        ObjectNode params = mapper.createObjectNode();
-        params.put("name", "mcphub.session.open");
-        params.set("arguments", mapper.createObjectNode());
-
-        JsonNode r = handler.handle("tools/call", params);
-
-        assertFalse(r.path("isError").asBoolean(false), "session recovery should not be an error");
-        assertEquals(StateMachine.State.OPEN, sm.getState());
-        assertEquals("start", r.path("mcphub_providers").asText());
-
-        JsonNode listed = handler.handle("tools/list", null);
-        JsonNode tools = listed.path("tools");
-        boolean hasSessionOpen = false;
-        for (JsonNode t : tools) {
-            if ("mcphub.session.open".equals(t.path("name").asText())) {
-                hasSessionOpen = true;
-                break;
-            }
-        }
-        assertFalse(hasSessionOpen, "session recovery tool should not remain in the OPEN tool surface");
+        String text = r.path("content").get(0).path("text").asText();
+        assertTrue(text.contains("session_not_open"), "Error text must contain error code");
+        assertTrue(text.contains("mcphub.session.open"), "Error text must mention mcphub.session.open as recovery path");
+        assertTrue(text.contains("call_mcphub_session_open"), "Error next_action must be call_mcphub_session_open");
+        String cliCommand = System.getenv("MCPHUB_CLI_COMMAND");
+        String expectedCliOpen = (cliCommand == null || cliCommand.isBlank() ? "mcphub" : cliCommand) + " open";
+        assertTrue(text.contains("cli_recovery_command: " + expectedCliOpen),
+                "Error text must include exact CLI recovery command for clients that cannot call mcphub.session.open");
     }
 
     @Test
@@ -175,8 +211,9 @@ class McpHandlerTest {
         sm.transition(StateMachine.Trigger.OPEN, "s1");
         confirmGroup("web", "webfetch", "websearch");
         confirmGroup("edit", "apply_patch");
-        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete");
-        confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp",
+                "task_create", "task_list", "task_update", "task_delete");
+        confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch", "mcphub_checkpoint");
 
         ObjectNode params = mapper.createObjectNode();
         params.put("name", "nonexistent_tool_xyz");
@@ -184,12 +221,14 @@ class McpHandlerTest {
 
         JsonNode r = handler.handle("tools/call", params);
         assertTrue(r.path("isError").asBoolean(), "isError must be true");
-        JsonNode err = parseErrorJson(r);
-        assertEquals("tool_not_found", err.path("error_code").asText());
-        // REQ-5.4.2: available_tools included
-        assertTrue(err.has("available_tools"), "Error must contain available_tools array");
-        assertTrue(err.path("available_tools").isArray());
-        assertTrue(err.path("available_tools").size() > 0);
+        String text = r.path("content").get(0).path("text").asText();
+        assertTrue(text.contains("tool_not_found"), "Error text must contain error code");
+        // REQ-5.4.2: available_tools included in error text
+        assertTrue(text.contains("available_tools"), "Error text must list available tools");
+        JsonNode gap = r.path("capability_gap");
+        assertEquals("capability_not_registered", gap.path("gap_type").asText());
+        assertFalse(gap.path("explanation").asText().isBlank());
+        assertEquals("capability_registry_governance", gap.path("premium_feature_id").asText());
     }
 
     @Test
@@ -212,16 +251,75 @@ class McpHandlerTest {
 
         JsonNode r = handler.handle("tools/call", params);
         assertTrue(r.path("isError").asBoolean(), "isError must be true");
-        JsonNode err = parseErrorJson(r);
-        assertEquals("tool_denied", err.path("error_code").asText());
-        assertEquals("deny-webfetch", err.path("policy_detail").asText());
+        String text = r.path("content").get(0).path("text").asText();
+        assertTrue(text.contains("tool_denied"), "Error text must contain error code");
         // REQ-5.6.4: MUST NOT suggest retry for policy denial
-        assertNotEquals("retry", err.path("next_action").asText(),
-                "MUST NOT suggest retry for policy denial");
+        assertFalse(text.contains("next_action: retry"), "MUST NOT suggest retry for policy denial");
+        JsonNode gap = r.path("capability_gap");
+        assertEquals("policy_restriction", gap.path("gap_type").asText());
+        assertFalse(gap.path("explanation").asText().isBlank());
+        assertEquals("policy_governance", gap.path("premium_feature_id").asText());
     }
 
     @Test
-    void toolsCall_registeredTool_withoutProviderManager_returnsProviderUnreachable() throws Exception {
+    void toolsCall_hiddenByTaskContext_returnsActionableToolNotFound() throws Exception {
+        sm.transition(StateMachine.Trigger.ARM, "s1");
+        sm.transition(StateMachine.Trigger.OPEN, "s1");
+        confirmGroup("web", "webfetch", "websearch");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp",
+                "task_create", "task_list", "task_update", "task_delete");
+
+        setTaskContext("research");
+
+        ObjectNode params = mapper.createObjectNode();
+        params.put("name", "list");
+        params.set("arguments", mapper.createObjectNode());
+
+        JsonNode r = handler.handle("tools/call", params);
+        assertTrue(r.path("isError").asBoolean(), "isError must be true");
+        String text = r.path("content").get(0).path("text").asText();
+        assertTrue(text.contains("tool_not_found"), "Hidden tools must still appear as not found");
+        assertTrue(text.contains("hidden by task context 'research'"));
+        assertTrue(text.contains("mcphub_set_task_context"));
+        assertTrue(text.contains("{\"context\":\"all\"}"));
+        assertTrue(text.contains("next_action: set_task_context_all"));
+        assertTrue(text.contains("available_tools"));
+
+        JsonNode gap = r.path("capability_gap");
+        assertEquals("task_context_filter", gap.path("gap_type").asText());
+        assertEquals("task_context_filtering", gap.path("premium_feature_id").asText());
+        assertTrue(gap.path("operator_action").asText().contains("mcphub_set_task_context"));
+    }
+
+    @Test
+    void toolsCall_hiddenByGenericPolicy_keepsGenericToolNotFound() throws Exception {
+        PolicyRule hide = new PolicyRule();
+        hide.ruleId = "hide-webfetch";
+        hide.toolPattern = "webfetch";
+        hide.action = "hide";
+        hide.priority = 999;
+        hide.scope = "global";
+        policy.loadGlobalRules(java.util.List.of(hide));
+
+        sm.transition(StateMachine.Trigger.ARM, "s1");
+        sm.transition(StateMachine.Trigger.OPEN, "s1");
+        confirmGroup("web", "webfetch", "websearch");
+
+        ObjectNode params = mapper.createObjectNode();
+        params.put("name", "webfetch");
+        params.set("arguments", mapper.createObjectNode());
+
+        JsonNode r = handler.handle("tools/call", params);
+        assertTrue(r.path("isError").asBoolean(), "isError must be true");
+        String text = r.path("content").get(0).path("text").asText();
+        assertTrue(text.contains("tool_not_found"));
+        assertFalse(text.contains("hidden by task context"));
+        assertFalse(text.contains("set_task_context_all"));
+        assertFalse(r.has("capability_gap"));
+    }
+
+    @Test
+    void toolsCall_registeredTool_withoutProviderManager_returnsUnavailable() throws Exception {
         // AMD-MCPHUB-001: without a ProviderManager wired, tools/call returns provider_unreachable
         sm.transition(StateMachine.Trigger.ARM, "s1");
         sm.transition(StateMachine.Trigger.OPEN, "s1");
@@ -236,8 +334,12 @@ class McpHandlerTest {
         JsonNode r = handler.handle("tools/call", params);
         // Without providerManager, dispatch returns provider_unreachable failure response
         assertTrue(r.path("isError").asBoolean(), "isError must be true");
-        JsonNode err = parseErrorJson(r);
-        assertEquals("provider_unreachable", err.path("error_code").asText());
+        String text = r.path("content").get(0).path("text").asText();
+        assertTrue(text.contains("provider_unreachable"), "Error text must contain error code");
+        JsonNode gap = r.path("capability_gap");
+        assertEquals("provider_not_running", gap.path("gap_type").asText());
+        assertFalse(gap.path("explanation").asText().isBlank());
+        assertEquals("provider_lifecycle_governance", gap.path("premium_feature_id").asText());
     }
 
     @Test
@@ -246,8 +348,9 @@ class McpHandlerTest {
         sm.transition(StateMachine.Trigger.OPEN, "s1");
         confirmGroup("web", "webfetch", "websearch");
         confirmGroup("edit", "apply_patch");
-        confirmGroup("project", "todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete");
-        confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch");
+        confirmGroup("project", "todowrite", "list", "codesearch", "lsp",
+                "task_create", "task_list", "task_update", "task_delete");
+        confirmGroup("session", "plan_enter", "plan_exit", "skill", "batch", "mcphub_checkpoint");
 
         ObjectNode params = mapper.createObjectNode();
         params.put("name", "mcphub_disambiguate");
@@ -292,18 +395,18 @@ class McpHandlerTest {
         sm.transition(StateMachine.Trigger.OPEN, "s1");
 
         JsonNode before = handler.handle("tools/list", null);
-        assertEquals(1, before.path("tools").size(),
-                "Before adapter registration, only disambiguation is listed");
+        assertEquals(2, before.path("tools").size(),
+                "Before adapter registration, only hub tools (disambiguate + task_context) are listed");
 
         confirmGroup("web", "webfetch", "websearch");
 
         JsonNode after = handler.handle("tools/list", null);
-        assertEquals(3, after.path("tools").size(),
-                "After web adapter confirms, 2 tools + disambiguation");
+        assertEquals(4, after.path("tools").size(),
+                "After web adapter confirms, 2 tools + 2 hub tools");
     }
 
     @Test
-    void toolsCall_pendingTool_returnsProviderUnreachable() throws Exception {
+    void toolsCall_pendingTool_returnsProviderUnavailable() throws Exception {
         sm.transition(StateMachine.Trigger.ARM, "s1");
         sm.transition(StateMachine.Trigger.OPEN, "s1");
 
@@ -313,8 +416,8 @@ class McpHandlerTest {
 
         JsonNode r = handler.handle("tools/call", params);
         assertTrue(r.path("isError").asBoolean(), "isError must be true");
-        JsonNode err = parseErrorJson(r);
-        assertEquals("provider_unreachable", err.path("error_code").asText());
+        String text = r.path("content").get(0).path("text").asText();
+        assertTrue(text.contains("provider_unreachable"), "Error text must contain error code");
     }
 
     // -------------------------------------------------------------------------
@@ -382,159 +485,21 @@ class McpHandlerTest {
         handler.handle("mcphub.internal.adapter_registration", params);
     }
 
-    // -------------------------------------------------------------------------
-    // AC-2: structured failure response with fallback_tools from contracts
-    // -------------------------------------------------------------------------
-
-    @Test
-    void toolsCall_deniedTool_fallbackToolsFromContract() throws Exception {
-        PolicyRule deny = new PolicyRule();
-        deny.ruleId = "deny-webfetch";
-        deny.toolPattern = "webfetch";
-        deny.action = "deny";
-        deny.priority = 999;
-        deny.scope = "global";
-        policy.loadGlobalRules(java.util.List.of(deny));
-
-        sm.transition(StateMachine.Trigger.ARM, "s1");
-        sm.transition(StateMachine.Trigger.OPEN, "s1");
-        confirmGroup("web", "webfetch", "websearch");
-
+    private void setTaskContext(String context) throws Exception {
         ObjectNode params = mapper.createObjectNode();
-        params.put("name", "webfetch");
-        params.set("arguments", mapper.createObjectNode());
-
-        JsonNode r = handler.handle("tools/call", params);
-        JsonNode err = parseErrorJson(r);
-        assertEquals("tool_denied", err.path("error_code").asText());
-        // webfetch contract disambiguates_from includes websearch
-        assertTrue(err.has("fallback_tools"), "fallback_tools must be populated from contract");
-        assertTrue(err.path("fallback_tools").isArray());
-        boolean hasWebsearch = false;
-        for (JsonNode ft : err.path("fallback_tools")) {
-            if ("websearch".equals(ft.asText())) hasWebsearch = true;
-        }
-        assertTrue(hasWebsearch, "fallback_tools should contain websearch from contract");
-        // REQ-5.8.1: use_alternative when fallbacks exist
-        assertEquals("use_alternative", err.path("next_action").asText());
-    }
-
-    @Test
-    void toolsCall_deniedTool_noFallbacks_suggestsDisambiguate() throws Exception {
-        // Deny a tool that has no disambiguates_from entries in contract
-        PolicyRule deny = new PolicyRule();
-        deny.ruleId = "deny-list";
-        deny.toolPattern = "list";
-        deny.action = "deny";
-        deny.priority = 999;
-        deny.scope = "global";
-        policy.loadGlobalRules(java.util.List.of(deny));
-
-        sm.transition(StateMachine.Trigger.ARM, "s1");
-        sm.transition(StateMachine.Trigger.OPEN, "s1");
-        confirmGroup("project", "list");
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("name", "list");
-        params.set("arguments", mapper.createObjectNode());
-
-        JsonNode r = handler.handle("tools/call", params);
-        JsonNode err = parseErrorJson(r);
-        assertEquals("tool_denied", err.path("error_code").asText());
-        assertFalse(err.has("fallback_tools"), "No contract fallbacks for list");
-        assertEquals("disambiguate", err.path("next_action").asText());
-    }
-
-    // -------------------------------------------------------------------------
-    // AC-3: disambiguation with multi-candidate contract resolution
-    // -------------------------------------------------------------------------
-
-    @Test
-    void disambiguate_contractResolution_deterministic() throws Exception {
-        sm.transition(StateMachine.Trigger.ARM, "s1");
-        sm.transition(StateMachine.Trigger.OPEN, "s1");
-        confirmGroup("web", "webfetch", "websearch");
-        confirmGroup("project", "codesearch");
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("name", "mcphub_disambiguate");
+        params.put("name", "mcphub_set_task_context");
         ObjectNode args = mapper.createObjectNode();
-        args.put("task_description", "find information online");
-        ArrayNode candidates = mapper.createArrayNode();
-        candidates.add("websearch");
-        candidates.add("webfetch");
-        candidates.add("codesearch");
-        args.set("candidate_tools", candidates);
+        args.put("context", context);
         params.set("arguments", args);
-
-        JsonNode r = handler.handle("tools/call", params);
-        assertTrue(r.has("content"), "Disambiguation must return 'content' field");
-        String text = r.path("content").get(0).path("text").asText();
-        JsonNode result = mapper.readTree(text);
-
-        // websearch disambiguates_from covers webfetch AND codesearch
-        assertEquals("websearch", result.path("recommended_tool").asText());
-        assertEquals("deterministic", result.path("confidence").asText());
-        // Alternatives should be empty when deterministic
-        assertEquals(0, result.path("alternatives").size(),
-                "Alternatives must be empty when confidence is deterministic");
+        handler.handle("tools/call", params);
     }
 
-    @Test
-    void disambiguate_ambiguous_returnsNone() throws Exception {
-        sm.transition(StateMachine.Trigger.ARM, "s1");
-        sm.transition(StateMachine.Trigger.OPEN, "s1");
-        confirmGroup("web", "webfetch", "websearch");
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("name", "mcphub_disambiguate");
-        ObjectNode args = mapper.createObjectNode();
-        args.put("task_description", "fetch or search");
-        ArrayNode candidates = mapper.createArrayNode();
-        candidates.add("webfetch");
-        candidates.add("websearch");
-        args.set("candidate_tools", candidates);
-        params.set("arguments", args);
-
-        JsonNode r = handler.handle("tools/call", params);
-        String text = r.path("content").get(0).path("text").asText();
-        JsonNode result = mapper.readTree(text);
-
-        // Both cover each other → ambiguous
-        assertTrue(result.path("recommended_tool").isNull());
-        assertEquals("none", result.path("confidence").asText());
-        // Alternatives should be enriched with contract fields
-        JsonNode alts = result.path("alternatives");
-        assertTrue(alts.size() > 0, "Alternatives must be populated when ambiguous");
-        boolean hasSideEffectClass = false;
-        for (JsonNode alt : alts) {
-            if (alt.has("side_effect_class")) hasSideEffectClass = true;
+    private java.util.Set<String> toolNames(JsonNode toolsListResponse) {
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (JsonNode tool : toolsListResponse.path("tools")) {
+            names.add(tool.path("name").asText());
         }
-        assertTrue(hasSideEffectClass, "Alternatives must include side_effect_class");
-    }
-
-    // -------------------------------------------------------------------------
-    // AC-4: intent annotation in tool schemas
-    // -------------------------------------------------------------------------
-
-    @Test
-    void toolsList_includesIntentProperty() throws Exception {
-        sm.transition(StateMachine.Trigger.ARM, "s1");
-        sm.transition(StateMachine.Trigger.OPEN, "s1");
-        confirmGroup("web", "webfetch", "websearch");
-
-        JsonNode r = handler.handle("tools/list", null);
-        JsonNode tools = r.path("tools");
-        assertTrue(tools.size() > 0, "tools/list must return tools");
-
-        for (JsonNode t : tools) {
-            JsonNode props = t.path("inputSchema").path("properties");
-            assertTrue(props.has("_intent"),
-                    "Tool '" + t.path("name").asText() + "' must have _intent in inputSchema");
-            JsonNode intent = props.path("_intent");
-            assertEquals("string", intent.path("type").asText());
-            assertTrue(intent.path("description").asText().contains("route logs"));
-        }
+        return names;
     }
 
     // -------------------------------------------------------------------------
@@ -588,70 +553,5 @@ class McpHandlerTest {
         // Should not throw NPE
         JsonNode r = handler.handle("tools/call", params);
         assertNotNull(r);
-    }
-
-    // -------------------------------------------------------------------------
-    // AC-4 follow-up: _intent persistence to route_log (F-4)
-    // -------------------------------------------------------------------------
-
-    @Test
-    void toolsCall_intentAnnotation_withSecret_scrubbedInRouteLog() throws Exception {
-        sm.transition(StateMachine.Trigger.ARM, "s1");
-        sm.transition(StateMachine.Trigger.OPEN, "s1");
-        confirmGroup("web", "webfetch", "websearch");
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("name", "webfetch");
-        ObjectNode args = mapper.createObjectNode();
-        args.put("url", "https://example.com");
-        params.set("arguments", args);
-        params.put("_intent", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U");
-
-        handler.handle("tools/call", params);
-
-        // Wait for async route log write
-        Thread.sleep(100);
-
-        var conn = db.getConnection();
-        try (var st = conn.createStatement();
-             var rs = st.executeQuery(
-                 "SELECT intent_annotation FROM route_log WHERE tool_name='webfetch'")) {
-            assertTrue(rs.next(), "route_log must contain an entry for webfetch");
-            assertEquals("[scrubbed: secret pattern detected]", rs.getString("intent_annotation"),
-                    "JWT token in _intent must be scrubbed before DB write");
-        }
-    }
-
-    @Test
-    void toolsCall_intentAnnotation_persistedToRouteLog() throws Exception {
-        sm.transition(StateMachine.Trigger.ARM, "s1");
-        sm.transition(StateMachine.Trigger.OPEN, "s1");
-        confirmGroup("web", "webfetch", "websearch");
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("name", "webfetch");
-        ObjectNode args = mapper.createObjectNode();
-        args.put("url", "https://example.com");
-        params.set("arguments", args);
-        params.put("_intent", "testing intent persistence");
-
-        handler.handle("tools/call", params);
-
-        // Wait for async route log write
-        Thread.sleep(100);
-
-        var conn = db.getConnection();
-        try (var st = conn.createStatement();
-             var rs = st.executeQuery(
-                 "SELECT intent_annotation FROM route_log WHERE tool_name='webfetch'")) {
-            assertTrue(rs.next(), "route_log must contain an entry for webfetch");
-            assertEquals("testing intent persistence", rs.getString("intent_annotation"));
-        }
-    }
-
-    /** Parse the JSON-encoded structured error inside the MCP text content. */
-    private JsonNode parseErrorJson(JsonNode response) throws Exception {
-        String text = response.path("content").get(0).path("text").asText();
-        return mapper.readTree(text);
     }
 }

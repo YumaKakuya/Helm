@@ -8,10 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -34,8 +32,11 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
     private static final Logger log = LoggerFactory.getLogger(McpHandler.class);
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final String DISAMBIGUATION_TOOL = "mcphub_disambiguate";
+    private static final String TASK_CONTEXT_TOOL = "mcphub_set_task_context";
     private static final String SESSION_OPEN_TOOL = "mcphub.session.open";
-    private static final String SERVER_VERSION = "0.1.0-alpha";
+    private static final String CLI_COMMAND_ENV = "MCPHUB_CLI_COMMAND";
+    private static final String CHECKPOINT_TOOL = "mcphub_checkpoint";
+    private static final String SERVER_VERSION = "0.2.0-alpha";
 
     private final StateMachine stateMachine;
     private final CapabilityRegistry registry;
@@ -45,7 +46,10 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
     private ProviderHealthTracker healthTracker;
     private SessionManager sessionManager;  // nullable; required for REQ-3.7.3 idle reset
     private ProviderManager providerManager; // AMD-MCPHUB-001: Java-native provider dispatch
+    private final ResultCache resultCache = new ResultCache(); // OS-12: session-scoped read-only cache
+    private final TaskContextFilter taskContextFilter = new TaskContextFilter(); // OS-14: task-context filtering
     private String serverName = "mcphub";
+    private String checkpointDir; // MCPHUB_DATA_DIR for mcphub_checkpoint persistence
 
     public McpHandler(StateMachine stateMachine, CapabilityRegistry registry,
                       PolicyEngine policy, DatabaseManager db, BodyBudgetService bodyBudget) {
@@ -56,6 +60,15 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         this.bodyBudget = bodyBudget;
         this.healthTracker = null;
         this.sessionManager = null;
+        this.checkpointDir = System.getenv("MCPHUB_DATA_DIR");
+        if (this.checkpointDir == null || this.checkpointDir.isBlank()) {
+            this.checkpointDir = System.getProperty("user.home") + "/.local/share/mcphub";
+        }
+    }
+
+    /** Wire checkpoint directory (used by tests to override). */
+    public void setCheckpointDir(String checkpointDir) {
+        this.checkpointDir = checkpointDir;
     }
 
     /** Optional wiring for REQ-4.7.2 runtime provider health updates. */
@@ -71,6 +84,16 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
     /** AMD-MCPHUB-001: Wire ProviderManager for direct provider dispatch. */
     public void setProviderManager(ProviderManager providerManager) {
         this.providerManager = providerManager;
+    }
+
+    /** OS-12: Access the result cache (for session close cleanup). */
+    public ResultCache getResultCache() {
+        return resultCache;
+    }
+
+    /** OS-14: Access the task context filter (for session close cleanup). */
+    public TaskContextFilter getTaskContextFilter() {
+        return taskContextFilter;
     }
 
     /** Optional override for MCP serverInfo.name. Defaults to "mcphub". */
@@ -127,12 +150,13 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         ObjectNode r = mapper.createObjectNode();
         ArrayNode tools = mapper.createArrayNode();
 
-        boolean isOpen = stateMachine.getState() == StateMachine.State.OPEN;
+        StateMachine.State currentState = stateMachine.getState();
+        boolean isOpen = currentState == StateMachine.State.OPEN;
         if (!isOpen) {
-            // Expose the recovery tool in the same AI-facing surface that reports session_not_open.
-            StateMachine.State current = stateMachine.getState();
+            // Approved amendment: CLOSED/ARMED may expose only mcphub.session.open,
+            // except when locked_until_unlock is active.
             if (!stateMachine.isLockedUntilUnlock()
-                    && (current == StateMachine.State.CLOSED || current == StateMachine.State.ARMED)) {
+                    && (currentState == StateMachine.State.CLOSED || currentState == StateMachine.State.ARMED)) {
                 tools.add(buildSessionOpenTool());
             }
             r.set("tools", tools);
@@ -147,6 +171,9 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
 
         // Add disambiguation tool (REQ-5.3.1, AXIOM-4 trade-off accepted in Spec)
         tools.add(buildDisambiguationTool());
+
+        // OS-14: Add task-context filtering tool
+        tools.add(buildTaskContextTool());
 
         r.set("tools", tools);
 
@@ -176,43 +203,50 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         tool.put("description", desc);
 
         // inputSchema from registry entry
-        JsonNode schemaNode;
         if (entry.schema != null) {
-            schemaNode = mapper.valueToTree(entry.schema);
+            tool.set("inputSchema", mapper.valueToTree(entry.schema));
         } else {
             ObjectNode emptySchema = mapper.createObjectNode();
             emptySchema.put("type", "object");
-            schemaNode = emptySchema;
-        }
-        tool.set("inputSchema", schemaNode);
-
-        // REQ-5.5.4: inject _intent into inputSchema so AI clients discover it
-        if (schemaNode instanceof ObjectNode schemaObj) {
-            JsonNode propsNode = schemaObj.get("properties");
-            ObjectNode props;
-            if (propsNode instanceof ObjectNode) {
-                props = (ObjectNode) propsNode;
-            } else {
-                props = mapper.createObjectNode();
-                schemaObj.set("properties", props);
-            }
-            if (!props.has("_intent")) {
-                ObjectNode intentProp = mapper.createObjectNode();
-                intentProp.put("type", "string");
-                intentProp.put("description",
-                    "Optional: brief reason WHY you chose this tool. " +
-                    "Persisted in route logs for auditing. Does not affect routing.");
-                props.set("_intent", intentProp);
-            }
+            tool.set("inputSchema", emptySchema);
         }
         return tool;
     }
 
-    /** Build the MCP-visible session recovery tool. */
+    /** Build the task-context MCP tool entry. OS-14 */
+    private ObjectNode buildTaskContextTool() {
+        ObjectNode tool = mapper.createObjectNode();
+        tool.put("name", TASK_CONTEXT_TOOL);
+        tool.put("description",
+            "Set the current task context to filter visible tools. " +
+            "Contexts: 'coding' (code editing tools), 'research' (web tools), " +
+            "'planning' (session/planning tools), 'all' (no filtering, default).");
+        ObjectNode schema = mapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode props = mapper.createObjectNode();
+        ObjectNode contextProp = mapper.createObjectNode();
+        contextProp.put("type", "string");
+        contextProp.put("description", "Task context: coding, research, planning, or all");
+        ArrayNode enumValues = mapper.createArrayNode();
+        enumValues.add("coding"); enumValues.add("research");
+        enumValues.add("planning"); enumValues.add("all");
+        contextProp.set("enum", enumValues);
+        props.set("context", contextProp);
+        schema.set("properties", props);
+        ArrayNode required = mapper.createArrayNode();
+        required.add("context");
+        schema.set("required", required);
+        tool.set("inputSchema", schema);
+        return tool;
+    }
+
+    /** Build the mcphub.session.open MCP tool entry (visible in all states). */
     private ObjectNode buildSessionOpenTool() {
         ObjectNode tool = mapper.createObjectNode();
         tool.put("name", SESSION_OPEN_TOOL);
-        tool.put("description", "Open the MCPHUB session so tools become available. Call this when session is CLOSED or ARMED.");
+        tool.put("description", "Open the MCPHUB session to make all tools available. " +
+                "Call this when session is CLOSED or ARMED. If the client cannot call this MCP tool, run: " +
+                cliOpenCommand());
         ObjectNode schema = mapper.createObjectNode();
         schema.put("type", "object");
         schema.set("properties", mapper.createObjectNode());
@@ -220,13 +254,14 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         return tool;
     }
 
-    /** Handle mcphub.session.open from tools/call so recovery is executable by AI clients. */
+    /** Handle mcphub.session.open: ARM + OPEN the session and start providers. */
     private JsonNode handleSessionOpen(long startMs, int requestSizeBytes, String intentAnnotation) {
         try {
             StateMachine.State current = stateMachine.getState();
             String sessionId = sessionManager != null ? sessionManager.getCurrentSessionId() : null;
 
             if (current == StateMachine.State.OPEN) {
+                // Idempotent: already open
                 logRoute(sessionId, SESSION_OPEN_TOOL, "mcphub-internal", "builtin_hosted",
                         "allowed", null, System.currentTimeMillis() - startMs,
                         requestSizeBytes, 0, intentAnnotation, null);
@@ -241,6 +276,7 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
             } else if (current == StateMachine.State.ARMED) {
                 sessionId = sessionManager != null ? sessionManager.getCurrentSessionId() : "mcp-session";
             } else {
+                // COOLING_DOWN or LOCKED
                 return failureResponse("session_not_open",
                         "Cannot open session in state: " + current.name() + ". Wait and retry.",
                         "wait_session", null, null);
@@ -255,12 +291,14 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
 
             ObjectNode resp = mapper.createObjectNode();
             resp.put("mcphub_providers", "start");
-            resp.set("content", wrapTextContent("{\"state\":\"OPEN\",\"session_id\":\"" + sessionId + "\",\"message\":\"Session opened. All tools are now available.\"}"));
+            resp.set("content", wrapTextContent(
+                    "{\"state\":\"OPEN\",\"session_id\":\"" + sessionId + "\",\"message\":\"Session opened. All tools are now available.\"}"));
             return resp;
+
         } catch (StateMachine.TransitionException e) {
             return failureResponse("session_not_open",
                     "Failed to open session: " + e.getMessage(),
-                    "retry", null, null);
+                    "wait_session", null, null);
         }
     }
 
@@ -285,13 +323,6 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         candidateTools.set("items", items);
         candidateTools.put("description", "Optional: restrict to these tool names");
         props.set("candidate_tools", candidateTools);
-        // REQ-5.5.4: inject _intent so AI clients discover it
-        ObjectNode intentProp = mapper.createObjectNode();
-        intentProp.put("type", "string");
-        intentProp.put("description",
-            "Optional: brief reason WHY you chose this tool. " +
-            "Persisted in route logs for auditing. Does not affect routing.");
-        props.set("_intent", intentProp);
         schema.set("properties", props);
         ArrayNode required = mapper.createArrayNode();
         required.add("task_description");
@@ -312,18 +343,36 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         if (intentAnnotation != null && intentAnnotation.length() > 500) {
             intentAnnotation = intentAnnotation.substring(0, 500);
         }
-        // REQ-5.5.5, REQ-5.10.3: scrub secret patterns from intent annotation
-        if (intentAnnotation != null && SecretScanner.containsSecret(intentAnnotation)) {
-            intentAnnotation = "[scrubbed: secret pattern detected]";
-        }
 
         int requestSizeBytes = params != null ? params.toString().length() : 0;
+
+        // Retrieve current session ID for route_log (REQ-8.3.1)
+        String routeSessionId = sessionManager != null ? sessionManager.getCurrentSessionId() : null;
+
+        // --- OS-14: Task-context tool handled specially ---
+        if (TASK_CONTEXT_TOOL.equals(toolName)) {
+            if (stateMachine.getState() != StateMachine.State.OPEN) {
+                return failureResponse("session_not_open",
+                        sessionOpenRecoveryReason("Task context requires an Open session."),
+                        "call_mcphub_session_open", null, null);
+            }
+            String contextName = params != null ? params.path("arguments").path("context").asText("all") : "all";
+            int beforeCount = policy.filterForAI(registry.getConfirmed()).size();
+            String applied = taskContextFilter.setContext(contextName, policy, registry);
+            int afterCount = policy.filterForAI(registry.getConfirmed()).size();
+            int hiddenCount = beforeCount - afterCount;
+            if (hiddenCount < 0) hiddenCount = 0;
+            logRoute(routeSessionId, TASK_CONTEXT_TOOL, "mcphub-internal", "builtin_hosted",
+                    "allowed", null, System.currentTimeMillis() - startMs,
+                    requestSizeBytes, 0, intentAnnotation, null);
+            return TaskContextFilter.buildResponse(applied, hiddenCount, afterCount);
+        }
 
         // --- Disambiguation tool is handled specially ---
         if (DISAMBIGUATION_TOOL.equals(toolName)) {
             String taskDesc = params != null ? params.path("arguments").path("task_description").asText(null) : null;
             JsonNode disambResult = handleDisambiguate(taskDesc, params);
-            logRoute(null, DISAMBIGUATION_TOOL, "mcphub-internal", "builtin_hosted",
+            logRoute(routeSessionId, DISAMBIGUATION_TOOL, "mcphub-internal", "builtin_hosted",
                     "allowed", null, System.currentTimeMillis() - startMs,
                     requestSizeBytes, disambResult.toString().length(), intentAnnotation, null);
             ObjectNode resp = mapper.createObjectNode();
@@ -331,7 +380,7 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
             return resp;
         }
 
-        // --- MCP-visible session recovery tool bypasses the state guard ---
+        // --- mcphub.session.open: bypass state guard, ARM+OPEN from any non-OPEN state ---
         if (SESSION_OPEN_TOOL.equals(toolName)) {
             return handleSessionOpen(startMs, requestSizeBytes, intentAnnotation);
         }
@@ -339,11 +388,11 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         // --- State guard (REQ-2.4.5, REQ-5.6.2 session_not_open) ---
         if (stateMachine.getState() != StateMachine.State.OPEN) {
             long latency = System.currentTimeMillis() - startMs;
-            logRoute(null, toolName, null, null,
+            logRoute(routeSessionId, toolName, null, null,
                     "error", null, latency, requestSizeBytes, null, intentAnnotation,
                     "session_not_open");
             return failureResponse("session_not_open",
-                    "Session is not Open. Call mcphub.session.open to reopen the session.",
+                    sessionOpenRecoveryReason("Session is not Open. Call mcphub.session.open to reopen the session."),
                     "call_mcphub_session_open", null, null);
         }
 
@@ -353,11 +402,16 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
             sessionManager.resetActivity();
         }
 
+        // --- mcphub_checkpoint: hub tool, handled in Java (after state guard) ---
+        if (CHECKPOINT_TOOL.equals(toolName)) {
+            return handleCheckpoint(params, routeSessionId, startMs, requestSizeBytes, intentAnnotation);
+        }
+
         // --- Tool existence check ---
         if (toolName == null) {
             long latency = System.currentTimeMillis() - startMs;
             // REQ-5.2.7: every tools/call dispatch must produce a route log entry
-            logRoute(null, "(missing)", null, null,
+            logRoute(routeSessionId, "(missing)", null, null,
                     "error", null, latency, requestSizeBytes, null, intentAnnotation, "tool_not_found");
             List<String> available = policy.filterForAI(registry.getConfirmed())
                     .stream().map(e -> e.displayName).collect(Collectors.toList());
@@ -368,53 +422,96 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         var entryOpt = registry.findByDisplayName(toolName);
         if (entryOpt.isEmpty()) {
             // REQ-5.4.2: include available_tools list
-            List<String> available = policy.filterForAI(registry.getConfirmed())
-                    .stream().map(e -> e.displayName).collect(Collectors.toList());
+            List<CapabilityEntry> altEntries = policy.filterForAI(registry.getConfirmed());
+            List<String> available = altEntries.stream()
+                    .map(e -> e.displayName).collect(Collectors.toList());
             long latency = System.currentTimeMillis() - startMs;
-            logRoute(null, toolName, null, null,
+            logRoute(routeSessionId, toolName, null, null,
                     "error", null, latency, requestSizeBytes, null, intentAnnotation, "tool_not_found");
-            return failureResponse("tool_not_found",
+            ObjectNode gapExplanation = CapabilityGapExplainer.explain(
+                    toolName, "tool_not_found", null, null, altEntries);
+            return failureResponseWithGap("tool_not_found",
                     "Tool '" + toolName + "' is not registered in MCPHUB.",
-                    "use_alternative", available, null);
+                    "use_alternative", available, null, gapExplanation);
         }
 
         CapabilityEntry entry = entryOpt.get();
         String providerType = providerTypeForEntry(entry);
         if (!"confirmed".equals(entry.runtimeState)) {
             long latency = System.currentTimeMillis() - startMs;
-            logRoute(null, toolName, entry.providerId, providerType,
+            logRoute(routeSessionId, toolName, entry.providerId, providerType,
                     "error", null, latency, requestSizeBytes, null, intentAnnotation, "provider_unreachable");
-            List<String> available = policy.filterForAI(registry.getConfirmed())
-                    .stream().map(e -> e.displayName).collect(Collectors.toList());
-            return failureResponse("provider_unreachable",
+            List<CapabilityEntry> altEntries = policy.filterForAI(registry.getConfirmed());
+            List<String> available = altEntries.stream()
+                    .map(e -> e.displayName).collect(Collectors.toList());
+            ObjectNode gapExplanation = CapabilityGapExplainer.explain(
+                    toolName, "provider_unreachable", null, entry, altEntries);
+            return failureResponseWithGap("provider_unreachable",
                     "Tool '" + toolName + "' is registered but its provider adapter is not running.",
-                    "wait_session", available, null);
+                    "wait_session", available, null, gapExplanation);
         }
 
         // --- Policy check (IS-06, REQ-2.4.3, REQ-5.2.6) ---
         PolicyEngine.PolicyResult policyResult = policy.evaluate(toolName);
         if (policyResult.decision() == PolicyEngine.Decision.DENY) {
             long latency = System.currentTimeMillis() - startMs;
-            logRoute(null, toolName, entry.providerId, providerType,
+            logRoute(routeSessionId, toolName, entry.providerId, providerType,
                     "denied", policyResult.matchedRuleId(), latency, requestSizeBytes, null,
                     intentAnnotation, "tool_denied");
-            List<String> contractFallbacks = findContractFallbacks(entry);
-            String nextAction = (contractFallbacks != null && !contractFallbacks.isEmpty())
-                    ? "use_alternative" : "disambiguate";
-            return failureResponse("tool_denied",
+            // OS-15: Capability-gap explanation for denied tools
+            List<CapabilityEntry> altEntries = policy.filterForAI(registry.getConfirmed());
+            ObjectNode gapExplanation = CapabilityGapExplainer.explain(
+                    toolName, "tool_denied", policyResult.matchedRuleId(), entry, altEntries);
+            return failureResponseWithGap("tool_denied",
                     "Tool '" + toolName + "' is denied by policy rule: " + policyResult.matchedRuleId(),
-                    nextAction, null, policyResult.matchedRuleId(), entry);
+                    "abort", null, policyResult.matchedRuleId(), gapExplanation);
         }
         if (policyResult.decision() == PolicyEngine.Decision.HIDE) {
             long latency = System.currentTimeMillis() - startMs;
-            logRoute(null, toolName, null, null,
+            logRoute(routeSessionId, toolName, null, null,
                     "error", null, latency, requestSizeBytes, null, intentAnnotation, "tool_not_found");
             // REQ-7.3.4: hidden tools appear as not found to AI
             // REQ-5.4.2: include available_tools so AI can self-correct
-            List<String> available = policy.filterForAI(registry.getConfirmed())
-                    .stream().map(e -> e.displayName).collect(Collectors.toList());
+            List<CapabilityEntry> altEntries = policy.filterForAI(registry.getConfirmed());
+            List<String> available = new java.util.ArrayList<>(altEntries.stream()
+                    .map(e -> e.displayName).toList());
+            if (isTaskContextHide(policyResult)) {
+                addIfMissing(available, TASK_CONTEXT_TOOL);
+                ObjectNode gapExplanation = CapabilityGapExplainer.explain(
+                        toolName, "tool_not_found", policyResult.matchedRuleId(), entry, altEntries);
+                return failureResponseWithGap("tool_not_found",
+                        "Tool '" + toolName + "' is currently hidden by task context '" +
+                                taskContextFilter.getCurrentContext().name().toLowerCase() +
+                                "'. Call " + TASK_CONTEXT_TOOL + " with {\"context\":\"all\"} " +
+                                "to restore the full tool list.",
+                        "set_task_context_all", available, policyResult.matchedRuleId(), gapExplanation);
+            }
             return failureResponse("tool_not_found",
                     "Tool '" + toolName + "' is not registered in MCPHUB.", "use_alternative", available, null);
+        }
+
+        // --- OS-13: Dry-run mode — return preview without calling provider ---
+        boolean isDryRun = params != null && params.path("arguments").path("_dry_run").asBoolean(false);
+        if (isDryRun) {
+            String groupId = resolveGroupId(toolName);
+            long latency = System.currentTimeMillis() - startMs;
+            logRoute(routeSessionId, toolName, entry.providerId, providerType,
+                    "allowed", policyResult.matchedRuleId(), latency,
+                    requestSizeBytes, 0, intentAnnotation, "dry_run");
+            return DryRunService.preview(entry, policyResult, groupId, providerType);
+        }
+
+        // --- OS-12: Check read-only result cache before dispatch ---
+        if (ResultCache.isCacheEligible(entry)) {
+            JsonNode arguments = params != null ? params.path("arguments") : mapper.createObjectNode();
+            JsonNode cached = resultCache.get(toolName, arguments);
+            if (cached != null) {
+                long latency = System.currentTimeMillis() - startMs;
+                logRoute(routeSessionId, toolName, entry.providerId, providerTypeForEntry(entry),
+                        "allowed", policyResult.matchedRuleId(), latency,
+                        requestSizeBytes, cached.toString().length(), intentAnnotation, null);
+                return cached;
+            }
         }
 
         // --- Dispatch: Java directly calls provider (AMD-MCPHUB-001) ---
@@ -436,30 +533,38 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
                 JsonNode providerResult = providerManager.call(groupId, "tools/call", forwardParams);
                 long latency = providerStartMs - startMs;
                 int respBytes = providerResult != null ? providerResult.toString().length() : 0;
-                logRoute(null, toolName, entry.providerId, providerType,
+                logRoute(routeSessionId, toolName, entry.providerId, providerType,
                         "allowed", policyResult.matchedRuleId(), latency,
                         requestSizeBytes, respBytes, intentAnnotation, null);
+                // OS-12: Cache result for read-only tools
+                if (ResultCache.isCacheEligible(entry) && providerResult != null) {
+                    JsonNode cacheArgs = params != null ? params.path("arguments") : mapper.createObjectNode();
+                    resultCache.put(toolName, cacheArgs, providerResult);
+                }
                 return providerResult;
             } catch (Exception e) {
                 long latency = providerStartMs - startMs;
-                logRoute(null, toolName, entry.providerId, providerType,
+                logRoute(routeSessionId, toolName, entry.providerId, providerType,
                         "error", policyResult.matchedRuleId(), latency,
                         requestSizeBytes, null, intentAnnotation, "provider_error");
                 return failureResponse("provider_error",
-                        "Provider '" + groupId + "' returned an error. Retry or check provider health.",
+                        "Provider '" + groupId + "' call failed: " + e.getMessage(),
                         "retry", null, null);
             }
         } else {
             // Provider not running — return structured failure
             long latency = System.currentTimeMillis() - startMs;
-            logRoute(null, toolName, entry.providerId, providerType,
+            logRoute(routeSessionId, toolName, entry.providerId, providerType,
                     "error", policyResult.matchedRuleId(), latency,
                     requestSizeBytes, null, intentAnnotation, "provider_unreachable");
-            List<String> available = policy.filterForAI(registry.getConfirmed())
-                    .stream().map(e2 -> e2.displayName).collect(Collectors.toList());
-            return failureResponse("provider_unreachable",
+            List<CapabilityEntry> altEntries = policy.filterForAI(registry.getConfirmed());
+            List<String> available = altEntries.stream()
+                    .map(e2 -> e2.displayName).collect(Collectors.toList());
+            ObjectNode gapExplanation = CapabilityGapExplainer.explain(
+                    toolName, "provider_unreachable", null, entry, altEntries);
+            return failureResponseWithGap("provider_unreachable",
                     "Provider group '" + groupId + "' is not running.",
-                    "wait_session", available, null);
+                    "wait_session", available, null, gapExplanation);
         }
     }
 
@@ -472,7 +577,8 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         // REQ-5.10.1: only when Open
         if (stateMachine.getState() != StateMachine.State.OPEN) {
             return failureResponse("session_not_open",
-                    "Disambiguation requires an Open session.", "wait_session", null, null);
+                    sessionOpenRecoveryReason("Disambiguation requires an Open session."),
+                    "call_mcphub_session_open", null, null);
         }
 
         if (taskDescription == null || taskDescription.isBlank()) {
@@ -515,95 +621,32 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
             result.put("unresolvable_reason",
                 "Registry has no enabled, policy-allowed tools to recommend.");
         } else {
-            // Multiple candidates — try contract-based resolution (REQ-5.3.3, REQ-5.3.8)
-            CapabilityEntry contractWinner = resolveByContracts(taskDescription, candidates);
-            if (contractWinner != null) {
-                result.put("recommended_tool", contractWinner.displayName);
-                result.put("confidence", "deterministic");
-                result.put("reason",
-                    "Contract-based disambiguation: '" + contractWinner.displayName +
-                    "' unambiguously covers all other candidates via disambiguates_from entries.");
-                result.putNull("unresolvable_reason");
-            } else {
-                result.putNull("recommended_tool"); // REQ-5.3.6: MUST be null when not deterministic
-                result.put("confidence", "none");
-                result.put("reason",
-                    candidates.size() + " tools are available. Hub cannot select without heuristic " +
-                    "guessing, which is prohibited by REQ-5.3.3. " +
-                    "Narrow via 'candidate_tools' to a single tool for a deterministic answer.");
-                result.put("unresolvable_reason",
-                    "Multiple tools match. Use candidate_tools to specify exactly one tool.");
-            }
+            // Multiple candidates — cannot determine deterministically (REQ-5.3.3 forbids heuristic)
+            result.putNull("recommended_tool"); // REQ-5.3.6: MUST be null when not deterministic
+            result.put("confidence", "none");
+            result.put("reason",
+                candidates.size() + " tools are available. Hub cannot select without heuristic " +
+                "guessing, which is prohibited by REQ-5.3.3. " +
+                "Narrow via 'candidate_tools' to a single tool for a deterministic answer.");
+            result.put("unresolvable_reason",
+                "Multiple tools match. Use candidate_tools to specify exactly one tool.");
         }
 
         // REQ-5.3.4: alternatives — list all candidates when no deterministic recommendation
-        // When confidence=deterministic (1 candidate or contract winner), alternatives is empty.
+        // When confidence=deterministic (1 candidate), alternatives is empty.
         ArrayNode alts = mapper.createArrayNode();
-        boolean deterministic = candidates.size() == 1
-                || (candidates.size() > 1 && resolveByContracts(taskDescription, candidates) != null);
-        if (!deterministic) {
+        if (candidates.size() != 1) {
             for (CapabilityEntry e : candidates) {
                 if (e.contract == null || e.contract.purpose == null) continue;
                 ObjectNode alt = mapper.createObjectNode();
                 alt.put("tool", e.displayName);
                 alt.put("reason", e.contract.purpose);
-                if (e.contract.sideEffectClass != null) {
-                    alt.put("side_effect_class", e.contract.sideEffectClass);
-                }
-                if (e.contract.whenToCall != null) {
-                    ArrayNode wtc = mapper.createArrayNode();
-                    e.contract.whenToCall.forEach(wtc::add);
-                    alt.set("when_to_call", wtc);
-                }
-                if (e.contract.disambiguatesFrom != null) {
-                    ArrayNode dfArr = mapper.createArrayNode();
-                    for (CapabilityContract.DisambiguatesFrom df : e.contract.disambiguatesFrom) {
-                        ObjectNode d = mapper.createObjectNode();
-                        d.put("capability_id", df.capabilityId);
-                        d.put("distinction", df.distinction);
-                        dfArr.add(d);
-                    }
-                    alt.set("disambiguates_from", dfArr);
-                }
                 alts.add(alt);
             }
         }
         result.set("alternatives", alts);
 
         return result;
-    }
-
-    /**
-     * Deterministic contract-based resolution among multiple candidates.
-     * REQ-5.3.3: no heuristic. REQ-5.3.8: deterministic when contracts unambiguously select one.
-     *
-     * @return the single candidate whose disambiguates_from covers ALL other candidates,
-     *         or null if ambiguous.
-     */
-    private CapabilityEntry resolveByContracts(String taskDescription, List<CapabilityEntry> candidates) {
-        if (candidates == null || candidates.size() < 2) return null;
-        CapabilityEntry winner = null;
-        int winnerCount = 0;
-        for (CapabilityEntry candidate : candidates) {
-            if (candidate.contract == null || candidate.contract.disambiguatesFrom == null) continue;
-            Set<String> coveredIds = candidate.contract.disambiguatesFrom.stream()
-                    .map(df -> df.capabilityId)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toSet());
-            boolean coversAllOthers = true;
-            for (CapabilityEntry other : candidates) {
-                if (other == candidate) continue;
-                if (!coveredIds.contains(other.capabilityId)) {
-                    coversAllOthers = false;
-                    break;
-                }
-            }
-            if (coversAllOthers) {
-                winner = candidate;
-                winnerCount++;
-            }
-        }
-        return winnerCount == 1 ? winner : null;
     }
 
     // -------------------------------------------------------------------------
@@ -644,6 +687,105 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
     }
 
     /**
+     * mcphub_checkpoint: persist session state for next-session handoff.
+     * Reads tasks.json and nexus issues, writes checkpoint file to data directory.
+     */
+    private JsonNode handleCheckpoint(JsonNode params, String sessionId,
+                                       long startMs, int requestSizeBytes, String intentAnnotation) {
+        String message = params != null ? params.path("arguments").path("message").asText(null) : null;
+        String project = params != null ? params.path("arguments").path("project").asText(null) : null;
+
+        if (message == null || message.isBlank()) {
+            return failureResponse("missing_parameter",
+                    "message is required for mcphub_checkpoint",
+                    "abort", null, null);
+        }
+
+        ObjectNode checkpoint = mapper.createObjectNode();
+        checkpoint.put("checkpoint_time", Instant.now().toString());
+        checkpoint.put("session_id", sessionId != null ? sessionId : "no-session");
+        checkpoint.put("handover_message", message);
+        if (project != null && !project.isBlank()) {
+            checkpoint.put("project", project);
+        }
+
+        // Read tasks from tasks.json
+        String tasksPath = System.getProperty("user.home") + "/.config/mcphub/tasks.json";
+        java.io.File tasksFile = new java.io.File(tasksPath);
+        if (tasksFile.exists()) {
+            try {
+                JsonNode tasksNode = mapper.readTree(tasksFile);
+                checkpoint.set("tasks", tasksNode);
+            } catch (Exception e) {
+                checkpoint.put("tasks_error", "Failed to read tasks: " + e.getMessage());
+            }
+        } else {
+            ArrayNode emptyTasks = mapper.createArrayNode();
+            checkpoint.set("tasks", emptyTasks);
+            checkpoint.put("tasks_note", "No tasks.json found — no tasks to save");
+        }
+
+        // Read nexus issues for project (if specified)
+        if (project != null && !project.isBlank()) {
+            String nexusBase = System.getenv("MCPHUB_NEXUS_BASE");
+            if (nexusBase == null || nexusBase.isBlank()) {
+                nexusBase = System.getProperty("user.home") + "/issue-store";
+            }
+            java.io.File projectDir = new java.io.File(nexusBase, project);
+            if (projectDir.exists() && projectDir.isDirectory()) {
+                ArrayNode issues = mapper.createArrayNode();
+                for (java.io.File f : projectDir.listFiles((dir, name) -> name.endsWith(".md"))) {
+                    ObjectNode issue = mapper.createObjectNode();
+                    issue.put("file", f.getName());
+                    issue.put("size", f.length());
+                    issue.put("last_modified", Instant.ofEpochMilli(f.lastModified()).toString());
+                    issues.add(issue);
+                }
+                checkpoint.set("nexus_issues", issues);
+                checkpoint.put("nexus_issue_count", issues.size());
+            } else {
+                checkpoint.put("nexus_note", "No issue-store directory found for project: " + project);
+            }
+        }
+
+        // Check for path traversal in checkpoint dir
+        String resolvedDir;
+        try {
+            java.io.File dirFile = new java.io.File(checkpointDir).getCanonicalFile();
+            dirFile.mkdirs();
+            resolvedDir = dirFile.getAbsolutePath();
+        } catch (Exception e) {
+            return failureResponse("checkpoint_error",
+                    "Cannot create checkpoint directory: " + e.getMessage(),
+                    "abort", null, null);
+        }
+
+        // Write checkpoint file
+        String timestamp = java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+        String checkpointFileName = "checkpoint_" + timestamp + ".json";
+        java.io.File checkpointFile = new java.io.File(resolvedDir, checkpointFileName);
+        try {
+            mapper.writerWithDefaultPrettyPrinter().writeValue(checkpointFile, checkpoint);
+        } catch (Exception e) {
+            return failureResponse("checkpoint_error",
+                    "Failed to write checkpoint: " + e.getMessage(),
+                    "abort", null, null);
+        }
+
+        // Log route
+        logRoute(sessionId, CHECKPOINT_TOOL, "mcphub-internal", "builtin_hosted",
+                "allowed", null, System.currentTimeMillis() - startMs,
+                requestSizeBytes, checkpoint.toString().length(), intentAnnotation, null);
+
+        // Build response
+        ObjectNode resp = mapper.createObjectNode();
+        resp.put("checkpoint_file", checkpointFile.getAbsolutePath());
+        resp.set("content", wrapTextContent(checkpoint.toString()));
+        return resp;
+    }
+
+    /**
      * Called by Go daemon on provider state transitions.
      * Params: { "group_id": "web", "status": "running|stopped|unavailable" }
      * REQ-4.7.2
@@ -667,61 +809,72 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         return r;
     }
 
-    /** Build structured failure response. REQ-5.6.1 (P1-03) — MCP CallToolResult compliant */
-    private ObjectNode failureResponse(String errorCode, String reason,
-            String nextAction, List<String> availableTools, String policyDetail) {
-        return failureResponse(errorCode, reason, nextAction, availableTools, policyDetail, null);
+    /** Build structured failure response with capability-gap explanation. OS-15 */
+    private ObjectNode failureResponseWithGap(String errorCode, String reason,
+            String nextAction, List<String> fallbackTools, String policyDetail,
+            com.fasterxml.jackson.databind.node.ObjectNode gapExplanation) {
+        ObjectNode r = failureResponse(errorCode, reason, nextAction, fallbackTools, policyDetail);
+        if (gapExplanation != null) {
+            r.set("capability_gap", gapExplanation);
+            // Add gap explanation as a second content item
+            ArrayNode content = (ArrayNode) r.get("content");
+            ObjectNode gapItem = mapper.createObjectNode();
+            gapItem.put("type", "text");
+            gapItem.put("text", "[MCPHUB capability_gap] " + gapExplanation.toString());
+            content.add(gapItem);
+        }
+        return r;
     }
 
+    /** Build structured failure response. REQ-5.6.1 (P1-03) — MCP CallToolResult compliant */
     private ObjectNode failureResponse(String errorCode, String reason,
-            String nextAction, List<String> availableTools, String policyDetail, CapabilityEntry entry) {
+            String nextAction, List<String> fallbackTools, String policyDetail) {
         ObjectNode r = mapper.createObjectNode();
+        // MCP-compliant content array (REQ-5.6.1 structured failure as text)
         ArrayNode content = mapper.createArrayNode();
         ObjectNode textItem = mapper.createObjectNode();
         textItem.put("type", "text");
-
-        ObjectNode structured = mapper.createObjectNode();
-        structured.put("error_code", errorCode);
-        structured.put("reason", reason);
-        if (nextAction != null) structured.put("next_action", nextAction);
-        if (policyDetail != null) structured.put("policy_detail", policyDetail);
-
-        List<String> fallbackTools = entry != null ? findContractFallbacks(entry) : null;
+        StringBuilder msg = new StringBuilder();
+        msg.append("[MCPHUB error] ").append(errorCode).append(": ").append(reason);
+        if (nextAction != null) {
+            msg.append(" | next_action: ").append(nextAction);
+        }
+        if (policyDetail != null) {
+            msg.append(" | policy: ").append(policyDetail);
+        }
         if (fallbackTools != null && !fallbackTools.isEmpty()) {
-            ArrayNode ft = mapper.createArrayNode();
-            fallbackTools.forEach(ft::add);
-            structured.set("fallback_tools", ft);
+            msg.append(" | available_tools: ").append(String.join(", ", fallbackTools));
         }
-
-        if (availableTools != null && !availableTools.isEmpty()) {
-            ArrayNode at = mapper.createArrayNode();
-            availableTools.forEach(at::add);
-            structured.set("available_tools", at);
-        }
-
-        textItem.put("text", structured.toString());
+        textItem.put("text", msg.toString());
         content.add(textItem);
         r.set("content", content);
         r.put("isError", true);
         return r;
     }
 
-    /** Look up disambiguates_from entries and return registered tool names. REQ-5.6.5 */
-    private List<String> findContractFallbacks(CapabilityEntry entry) {
-        if (entry == null || entry.contract == null || entry.contract.disambiguatesFrom == null) {
-            return null;
+    private String sessionOpenRecoveryReason(String reason) {
+        return reason + " If the client cannot call that MCP tool, run CLI: " +
+                cliOpenCommand() + " | cli_recovery_command: " + cliOpenCommand();
+    }
+
+    private String cliOpenCommand() {
+        String command = System.getenv(CLI_COMMAND_ENV);
+        if (command == null || command.isBlank()) {
+            command = "mcphub";
         }
-        List<String> result = new ArrayList<>();
-        for (CapabilityContract.DisambiguatesFrom df : entry.contract.disambiguatesFrom) {
-            if (df.capabilityId != null) {
-                registry.findByCapabilityId(df.capabilityId).ifPresent(e -> {
-                    if (policy.evaluate(e.displayName).decision() == PolicyEngine.Decision.ALLOW) {
-                        result.add(e.displayName);
-                    }
-                });
-            }
+        return command + " open";
+    }
+
+    private boolean isTaskContextHide(PolicyEngine.PolicyResult policyResult) {
+        return policyResult != null
+                && policyResult.matchedRuleId() != null
+                && policyResult.matchedRuleId().startsWith("task-ctx-hide-");
+    }
+
+    private void addIfMissing(List<String> tools, String toolName) {
+        if (tools != null && !tools.contains(toolName)) {
+            tools.add(toolName);
         }
-        return result.isEmpty() ? null : result;
     }
 
     /** Fire-and-forget route log (IS-05, REQ-8.3.2: async, must not block) */
@@ -754,8 +907,12 @@ public class McpHandler implements JsonRpcServer.MethodHandler {
         return switch (toolName) {
             case "webfetch", "websearch" -> "web";
             case "apply_patch" -> "edit";
-            case "todowrite", "list", "codesearch", "lsp" -> "project";
-            case "plan_enter", "plan_exit", "skill", "batch" -> "session";
+            case "todowrite", "list", "codesearch", "lsp",
+                 "task_create", "task_list", "task_update", "task_delete" -> "project";
+            case "nexus_issue_create", "nexus_issue_list",
+                 "nexus_issue_close", "nexus_issue_update" -> "nexus";
+            case "plan_enter", "plan_exit", "skill", "batch",
+                 "mcphub_checkpoint" -> "session";
             case "synthetic_delay" -> "synthetic";
             default -> "unknown";
         };

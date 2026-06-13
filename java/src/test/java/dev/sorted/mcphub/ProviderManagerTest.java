@@ -20,14 +20,15 @@ import static org.junit.jupiter.api.Assertions.*;
 class ProviderManagerTest {
 
     @Test
-    void defaultGroups_contains5Groups() {
+    void defaultGroups_contains6Groups() {
         List<ProviderManager.GroupConfig> groups = ProviderManager.defaultGroups();
-        assertEquals(5, groups.size());
+        assertEquals(6, groups.size());
         assertEquals("web", groups.get(0).id());
         assertEquals("edit", groups.get(1).id());
         assertEquals("project", groups.get(2).id());
-        assertEquals("session", groups.get(3).id());
-        assertEquals("synthetic", groups.get(4).id());
+        assertEquals("nexus", groups.get(3).id());
+        assertEquals("session", groups.get(4).id());
+        assertEquals("synthetic", groups.get(5).id());
     }
 
     @Test
@@ -42,10 +43,19 @@ class ProviderManagerTest {
         assertEquals("project", pm.resolveGroupId("list"));
         assertEquals("project", pm.resolveGroupId("codesearch"));
         assertEquals("project", pm.resolveGroupId("lsp"));
+        assertEquals("project", pm.resolveGroupId("task_create"));
+        assertEquals("project", pm.resolveGroupId("task_list"));
+        assertEquals("project", pm.resolveGroupId("task_update"));
+        assertEquals("project", pm.resolveGroupId("task_delete"));
+        assertEquals("nexus", pm.resolveGroupId("nexus_issue_create"));
+        assertEquals("nexus", pm.resolveGroupId("nexus_issue_list"));
+        assertEquals("nexus", pm.resolveGroupId("nexus_issue_close"));
+        assertEquals("nexus", pm.resolveGroupId("nexus_issue_update"));
         assertEquals("session", pm.resolveGroupId("plan_enter"));
         assertEquals("session", pm.resolveGroupId("plan_exit"));
         assertEquals("session", pm.resolveGroupId("skill"));
         assertEquals("session", pm.resolveGroupId("batch"));
+        assertEquals("session", pm.resolveGroupId("mcphub_checkpoint"));
         assertEquals("unknown", pm.resolveGroupId("nonexistent_tool"));
     }
 

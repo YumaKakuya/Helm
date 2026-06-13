@@ -1,5 +1,6 @@
 package dev.sorted.mcphub;
 
+import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -15,6 +16,7 @@ public class ProviderHealthTracker {
 
     /** Key: group_id (e.g., "web"). Value: "running" | "stopped" | "unavailable". */
     private final Map<String, String> groupHealth = new ConcurrentHashMap<>();
+    private final Map<String, String> toolGroups = new ConcurrentHashMap<>();
 
     public void updateGroup(String groupId, String status) {
         if (groupId == null || groupId.isBlank()) return;
@@ -26,10 +28,20 @@ public class ProviderHealthTracker {
         return groupHealth.getOrDefault(groupId, UNAVAILABLE);
     }
 
+    public void mapTools(String groupId, Collection<String> toolNames) {
+        if (groupId == null || groupId.isBlank() || toolNames == null) return;
+        for (String toolName : toolNames) {
+            if (toolName != null && !toolName.isBlank()) {
+                toolGroups.put(toolName, groupId);
+            }
+        }
+    }
+
     /** Map a tool's display_name to its current health via group mapping. */
     public String healthForTool(String toolName) {
         if (toolName == null || toolName.isBlank()) return UNAVAILABLE;
-        String group = CapabilityRegistry.groupForTool(toolName);
+        String group = toolGroups.get(toolName);
+        if (group == null) group = CapabilityRegistry.groupForTool(toolName);
         if (group == null) return UNAVAILABLE;
         return getGroupHealth(group);
     }
@@ -40,6 +52,7 @@ public class ProviderHealthTracker {
 
     public void clear() {
         groupHealth.clear();
+        toolGroups.clear();
     }
 
     private String normalize(String status) {

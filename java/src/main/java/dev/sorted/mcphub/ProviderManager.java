@@ -87,9 +87,13 @@ public class ProviderManager {
             new GroupConfig("edit", "edit/index.js", null,
                     new String[]{"apply_patch"}, "builtin_hosted"),
             new GroupConfig("project", "project/index.js", null,
-                    new String[]{"todowrite", "list", "codesearch", "lsp", "task_create", "task_list", "task_update", "task_delete"}, "builtin_hosted"),
+                    new String[]{"todowrite", "list", "codesearch", "lsp",
+                                 "task_create", "task_list", "task_update", "task_delete"}, "builtin_hosted"),
+            new GroupConfig("nexus", "nexus/index.js", null,
+                    new String[]{"nexus_issue_create", "nexus_issue_list",
+                                 "nexus_issue_close", "nexus_issue_update"}, "builtin_hosted"),
             new GroupConfig("session", "session/index.js", null,
-                    new String[]{"plan_enter", "plan_exit", "skill", "batch"}, "builtin_hosted"),
+                    new String[]{"plan_enter", "plan_exit", "skill", "batch", "mcphub_checkpoint"}, "builtin_hosted"),
             new GroupConfig("synthetic", "synthetic/index.js", null,
                     new String[]{"synthetic_delay"}, "builtin_hosted")
         );
@@ -272,14 +276,12 @@ public class ProviderManager {
             try {
                 return futureResult.get(CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             } catch (java.util.concurrent.TimeoutException e) {
-                restartBrokenProvider(groupId);
-                throw new IOException("Provider '" + groupId + "' call timed out after " + CALL_TIMEOUT_MS + "ms");
+                String message = "Provider '" + groupId + "' call timed out after " + CALL_TIMEOUT_MS + "ms";
+                log.warn("{}; restarting provider group to clear stale stdio readers", message);
+                restartGroup(groupId);
+                throw new IOException(message);
             } catch (java.util.concurrent.ExecutionException e) {
-                String causeMsg = e.getCause() != null ? e.getCause().getMessage() : e.getMessage();
-                if (causeMsg != null && causeMsg.contains("closed stdout")) {
-                    restartBrokenProvider(groupId);
-                }
-                throw new IOException("Provider '" + groupId + "' call failed: " + causeMsg);
+                throw new IOException("Provider '" + groupId + "' call failed: " + e.getCause().getMessage());
             }
         }
     }
@@ -290,32 +292,60 @@ public class ProviderManager {
         return proc != null && proc.process.isAlive();
     }
 
+    /**
+     * Restart a specific provider group. REQ-6.2.8.
+     * Returns true if restart was successful, false otherwise.
+     */
+    public boolean restartGroup(String groupId) {
+        GroupConfig cfg = null;
+        for (GroupConfig g : groups) {
+            if (g.id.equals(groupId)) { cfg = g; break; }
+        }
+        if (cfg == null) {
+            log.warn("Cannot restart unknown provider group: {}", groupId);
+            return false;
+        }
+
+        // Stop the group
+        ProviderProcess existing = processes.get(groupId);
+        if (existing != null && existing.process.isAlive()) {
+            log.info("Stopping provider group '{}' for restart (pid {})", groupId, existing.process.pid());
+            existing.process.destroy();
+            try {
+                if (!existing.process.waitFor(3, TimeUnit.SECONDS)) {
+                    existing.process.destroyForcibly();
+                }
+            } catch (InterruptedException e) {
+                existing.process.destroyForcibly();
+                Thread.currentThread().interrupt();
+            }
+            processes.remove(groupId);
+        }
+
+        // Restart
+        try {
+            start(cfg);
+            reportHealth(groupId, "running");
+            confirmWithRegistry(cfg);
+            log.info("Provider group '{}' restarted successfully", groupId);
+            return true;
+        } catch (Exception e) {
+            log.error("Failed to restart provider group '{}': {}", groupId, e.getMessage());
+            reportHealth(groupId, "unavailable");
+            return false;
+        }
+    }
+
+    /** Return all configured group IDs. */
+    public List<String> getGroupIds() {
+        List<String> ids = new ArrayList<>();
+        for (GroupConfig g : groups) ids.add(g.id);
+        return ids;
+    }
+
     // -------------------------------------------------------------------------
     // Internal
     // -------------------------------------------------------------------------
-
-    /** Kill and restart a provider whose stdin/stdout sync may be broken
-     *  (e.g., after a call timeout or stdout close). */
-    private void restartBrokenProvider(String groupId) {
-        ProviderProcess broken = processes.remove(groupId);
-        if (broken != null) {
-            broken.process.destroy();
-            log.warn("Provider group '{}' call failed — destroying and restarting", groupId);
-            for (GroupConfig g : groups) {
-                if (g.id.equals(groupId)) {
-                    try {
-                        start(g);
-                        reportHealth(groupId, "running");
-                        confirmWithRegistry(g);
-                    } catch (Exception restartEx) {
-                        log.error("Failed to restart provider group '{}' after failure: {}", groupId, restartEx.getMessage());
-                        reportHealth(groupId, "unavailable");
-                    }
-                    break;
-                }
-            }
-        }
-    }
 
     private void start(GroupConfig cfg) throws IOException {
         // Prevent orphan processes: skip if group already has a running process
@@ -410,6 +440,9 @@ public class ProviderManager {
                 }
             }
             groupTools.put(cfg.id, names);
+            if (healthTracker != null) {
+                healthTracker.mapTools(cfg.id, names);
+            }
 
             // Register with capability registry
             if (registry != null) {

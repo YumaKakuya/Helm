@@ -2,12 +2,14 @@ package dev.sorted.mcphub;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.InputStream;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -189,170 +191,21 @@ class ControlHandlerTest {
                 "Tracker must be cleared on COOLING_DOWN transition");
     }
 
-    // -------------------------------------------------------------------------
-    // AC-1: add_session_rule
-    // -------------------------------------------------------------------------
-
-    @Test
-    void addSessionRule_whenArmed_succeeds() throws Exception {
-        ControlHandler h = createCapabilityAwareHandler();
-        h.handle("mcphub.control.arm", null);
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("tool_pattern", "webfetch");
-        params.put("action", "deny");
-        params.put("rule_id", "test-deny-webfetch");
-        params.put("priority", 500);
-
-        JsonNode r = h.handle("mcphub.control.add_session_rule", params);
-        assertEquals("ok", r.path("status").asText());
-        assertEquals("test-deny-webfetch", r.path("rule_id").asText());
-        assertEquals("session", r.path("scope").asText());
-        assertEquals("ARMED", r.path("state").asText());
-    }
-
-    @Test
-    void addSessionRule_whenOpen_succeeds() throws Exception {
-        ControlHandler h = createCapabilityAwareHandler();
-        h.handle("mcphub.control.arm", null);
-        h.handle("mcphub.control.open", null);
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("tool_pattern", "webfetch");
-        params.put("action", "hide");
-
-        JsonNode r = h.handle("mcphub.control.add_session_rule", params);
-        assertEquals("ok", r.path("status").asText());
-        assertEquals("session", r.path("scope").asText());
-        assertEquals("OPEN", r.path("state").asText());
-    }
-
-    @Test
-    void addSessionRule_whenClosed_rejects() throws Exception {
-        ControlHandler h = createCapabilityAwareHandler();
-        ObjectNode params = mapper.createObjectNode();
-        params.put("tool_pattern", "webfetch");
-        params.put("action", "deny");
-
-        JsonRpcServer.JsonRpcException ex = assertThrows(
-            JsonRpcServer.JsonRpcException.class,
-            () -> h.handle("mcphub.control.add_session_rule", params));
-        assertTrue(ex.getMessage().contains("Armed or Open"));
-    }
-
-    @Test
-    void addSessionRule_invalidAction_rejects() throws Exception {
-        ControlHandler h = createCapabilityAwareHandler();
-        h.handle("mcphub.control.arm", null);
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("tool_pattern", "webfetch");
-        params.put("action", "block");
-
-        JsonRpcServer.JsonRpcException ex = assertThrows(
-            JsonRpcServer.JsonRpcException.class,
-            () -> h.handle("mcphub.control.add_session_rule", params));
-        assertTrue(ex.getMessage().contains("allow, deny, or hide"));
-    }
-
-    @Test
-    void addSessionRule_missingToolPattern_rejects() throws Exception {
-        ControlHandler h = createCapabilityAwareHandler();
-        h.handle("mcphub.control.arm", null);
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("action", "deny");
-
-        JsonRpcServer.JsonRpcException ex = assertThrows(
-            JsonRpcServer.JsonRpcException.class,
-            () -> h.handle("mcphub.control.add_session_rule", params));
-        assertTrue(ex.getMessage().contains("Missing required params"));
-    }
-
-    @Test
-    void addSessionRule_missingAction_rejects() throws Exception {
-        ControlHandler h = createCapabilityAwareHandler();
-        h.handle("mcphub.control.arm", null);
-
-        ObjectNode params = mapper.createObjectNode();
-        params.put("tool_pattern", "webfetch");
-
-        JsonRpcServer.JsonRpcException ex = assertThrows(
-            JsonRpcServer.JsonRpcException.class,
-            () -> h.handle("mcphub.control.add_session_rule", params));
-        assertTrue(ex.getMessage().contains("Missing required params"));
-    }
-
-    @Test
-    void sessionRule_purgedOnClose_thenToolAllowedAgain() throws Exception {
+    private ControlHandler createCapabilityAwareHandler() throws Exception {
         CapabilityRegistry registry = new CapabilityRegistry();
         try (InputStream is = ControlHandlerTest.class.getResourceAsStream("/capabilities.yaml")) {
             assertNotNull(is, "capabilities.yaml must be in classpath");
             registry.load(is);
         }
+
         PolicyEngine policy = new PolicyEngine();
         policy.loadGlobalRules(registry.getPolicyRules());
+
         BodyBudgetService bodyBudget = new BodyBudgetService(db);
         bodyBudget.setMcphubHostedToolCount(registry.getLoadedCount());
-        ControlHandler h = new ControlHandler(sm, session, db, registry, policy, bodyBudget);
 
-        // Arm session
-        h.handle("mcphub.control.arm", null);
-
-        // Add session rule to deny webfetch
-        ObjectNode ruleParams = mapper.createObjectNode();
-        ruleParams.put("tool_pattern", "webfetch");
-        ruleParams.put("action", "deny");
-        ruleParams.put("rule_id", "session-deny-webfetch");
-        JsonNode addResult = h.handle("mcphub.control.add_session_rule", ruleParams);
-        assertEquals("ok", addResult.path("status").asText());
-
-        // Verify tool is denied before close
-        assertEquals(PolicyEngine.Decision.DENY, policy.evaluate("webfetch").decision());
-
-        // Open, then close (triggers COOLING_DOWN → clearSessionRules)
-        h.handle("mcphub.control.open", null);
-        h.handle("mcphub.control.close", null);
-
-        // Arm and open a new session
-        h.handle("mcphub.control.arm", null);
-        h.handle("mcphub.control.open", null);
-
-        // Verify previously-denied tool is now allowed (session rule was purged)
-        assertEquals(PolicyEngine.Decision.ALLOW, policy.evaluate("webfetch").decision());
+        return new ControlHandler(sm, session, db, registry, policy, bodyBudget);
     }
-
-    @Test
-    void sessionRule_withExplicitLowPriority_doesNotOverrideGlobalRule() throws Exception {
-        // Global rule: deny webfetch at priority 1000
-        PolicyEngine policy = new PolicyEngine();
-        PolicyRule globalDeny = new PolicyRule();
-        globalDeny.ruleId = "global-deny-webfetch";
-        globalDeny.toolPattern = "webfetch";
-        globalDeny.action = "deny";
-        globalDeny.priority = 1000;
-        globalDeny.scope = "global";
-        policy.loadGlobalRules(java.util.List.of(globalDeny));
-
-        // Session rule: allow webfetch at priority -1 (explicitly low, opt-out of boost)
-        PolicyRule sessionAllow = new PolicyRule();
-        sessionAllow.ruleId = "session-allow-webfetch";
-        sessionAllow.toolPattern = "webfetch";
-        sessionAllow.action = "allow";
-        sessionAllow.priority = -1;
-        sessionAllow.scope = "session";
-        policy.addSessionRule(sessionAllow);
-
-        // Global deny should win because session rule has explicit low priority (-1) and is NOT boosted
-        PolicyEngine.PolicyResult result = policy.evaluate("webfetch");
-        assertEquals(PolicyEngine.Decision.DENY, result.decision(),
-                "Global deny at priority 1000 must override session allow at priority -1");
-        assertEquals("global-deny-webfetch", result.matchedRuleId());
-    }
-
-    // -------------------------------------------------------------------------
-    // Bridge attach/detach idle timeout suppression
-    // -------------------------------------------------------------------------
 
     @Test
     void bridgeAttach_incrementsCount() throws Exception {
@@ -406,12 +259,14 @@ class ControlHandlerTest {
         assertEquals(0, result.get("active_bridges").asInt());
 
         assertEquals(StateMachine.State.OPEN, freshSm.getState(),
-            "Session should not close immediately after last bridge detaches");
+            "Session should remain OPEN immediately after last bridge detaches");
+        assertNotNull(shortSession.getCurrentSessionId());
 
         Thread.sleep(3000);
         assertEquals(StateMachine.State.CLOSED, freshSm.getState(),
-            "Session should close after resumed idle timer fires");
-        assertNull(shortSession.getCurrentSessionId());
+            "Session should close only after resumed idle timer fires");
+        assertNull(shortSession.getCurrentSessionId(),
+            "Session ID must be cleared after idle timeout close");
 
         ch.shutdown();
         shortSession.shutdown();
@@ -430,12 +285,64 @@ class ControlHandlerTest {
         ControlHandler ch = new ControlHandler(freshSm, shortSession, db);
         ch.handle("mcphub.control.bridge_attach", mapper.readTree("{\"pid\":12345}"));
         ch.handle("mcphub.control.bridge_attach", mapper.readTree("{\"pid\":12346}"));
-        ch.handle("mcphub.control.bridge_detach", mapper.readTree("{\"pid\":12345}"));
+
+        JsonNode result = ch.handle("mcphub.control.bridge_detach", mapper.readTree("{\"pid\":12345}"));
+        assertEquals("ok", result.get("status").asText());
+        assertEquals(1, result.get("active_bridges").asInt());
 
         Thread.sleep(3000);
         assertEquals(StateMachine.State.OPEN, freshSm.getState(),
-            "Session should remain OPEN when one bridge detaches but another remains");
+            "Session should remain OPEN while another bridge is attached");
         assertNotNull(shortSession.getCurrentSessionId());
+
+        ch.shutdown();
+        shortSession.shutdown();
+    }
+
+    @Test
+    void bridgeDetach_armedClosesDirectly() throws Exception {
+        StateMachine freshSm = new StateMachine();
+        freshSm.transition(StateMachine.Trigger.ARM, "s1");
+
+        SessionManager shortSession = new SessionManager(1, 300);
+        shortSession.startSession();
+
+        ControlHandler ch = new ControlHandler(freshSm, shortSession, db);
+        ch.handle("mcphub.control.bridge_attach", mapper.readTree("{\"pid\":12345}"));
+
+        JsonNode result = ch.handle("mcphub.control.bridge_detach", mapper.readTree("{\"pid\":12345}"));
+        assertEquals("ok", result.get("status").asText());
+        assertEquals(0, result.get("active_bridges").asInt());
+        assertEquals(StateMachine.State.CLOSED, freshSm.getState(),
+            "ARMED session must close directly on bridge detach");
+        assertNull(shortSession.getCurrentSessionId());
+
+        ch.shutdown();
+        shortSession.shutdown();
+    }
+
+    @Test
+    void bridgeDetach_unknownPid_idempotentNoOp() throws Exception {
+        // REQ-3.7.2: unknown PID detach is idempotent — no state change, no error.
+        StateMachine freshSm = new StateMachine();
+        freshSm.transition(StateMachine.Trigger.ARM, "s1");
+        freshSm.transition(StateMachine.Trigger.OPEN, "s1");
+
+        SessionManager shortSession = new SessionManager(1, 300);
+        shortSession.startSession();
+        shortSession.onOpen();
+
+        ControlHandler ch = new ControlHandler(freshSm, shortSession, db);
+        ch.handle("mcphub.control.bridge_attach", mapper.readTree("{\"pid\":12345}"));
+
+        // Detach an unknown PID — must return ok, state unchanged
+        JsonNode result = ch.handle("mcphub.control.bridge_detach", mapper.readTree("{\"pid\":99999}"));
+        assertEquals("ok", result.get("status").asText());
+        assertEquals(1, result.get("active_bridges").asInt());
+
+        Thread.sleep(500);
+        assertEquals(StateMachine.State.OPEN, freshSm.getState(),
+            "Unknown PID detach must not change session state");
 
         ch.shutdown();
         shortSession.shutdown();
@@ -461,21 +368,5 @@ class ControlHandlerTest {
 
         ch.shutdown();
         shortSession.shutdown();
-    }
-
-    private ControlHandler createCapabilityAwareHandler() throws Exception {
-        CapabilityRegistry registry = new CapabilityRegistry();
-        try (InputStream is = ControlHandlerTest.class.getResourceAsStream("/capabilities.yaml")) {
-            assertNotNull(is, "capabilities.yaml must be in classpath");
-            registry.load(is);
-        }
-
-        PolicyEngine policy = new PolicyEngine();
-        policy.loadGlobalRules(registry.getPolicyRules());
-
-        BodyBudgetService bodyBudget = new BodyBudgetService(db);
-        bodyBudget.setMcphubHostedToolCount(registry.getLoadedCount());
-
-        return new ControlHandler(sm, session, db, registry, policy, bodyBudget);
     }
 }

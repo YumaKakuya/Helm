@@ -147,21 +147,25 @@ capabilities:
       properties:
         patch:
           type: string
-          description: "Unified diff patch content"
+          description: "Patch content. Supported formats (auto-detected): (1) git-style unified diff with '--- a/path' / '+++ b/path' headers (preferred, applied with patch -p1); (2) plain unified diff with '--- path' / '+++ path' headers (applied with patch -p0); (3) OpenAI/GPT '*** Begin Patch' format with '*** Add/Update/Delete File: path' directives and @@ hunks."
         cwd:
           type: string
           description: "Working directory to apply patch in (optional, defaults to current)"
       required: [patch]
     contract:
-      purpose: "Apply a unified diff patch to files in the workspace. Modifies local file state."
+      purpose: "Apply a patch to files in the workspace. Supports git-style unified diff (preferred), plain unified diff, and OpenAI/GPT-style '*** Begin Patch' format. Modifies local file state."
       may_do:
-        - "Apply unified diff patches to existing files"
+        - "Apply git-style unified diff patches (patch -p1)"
+        - "Apply plain unified diff patches (patch -p0)"
+        - "Add, update, or delete files via Begin Patch format"
         - "Create new files if the patch specifies them"
       must_not_do:
         - "Apply patches outside the workspace root"
+        - "Accept absolute paths or '..' path-segment traversal in any supported patch format"
         - "Make network calls"
       when_to_call:
         - "A patch or diff has been prepared and needs to be applied to files"
+        - "An AI assistant has generated a Begin Patch block for file changes"
       when_not_to_call:
         - "Direct file editing is simpler; use edit or write instead"
       side_effect_class: "local_state"
@@ -355,6 +359,145 @@ capabilities:
       side_effect_class: "local_state"
       timeout_hint_ms: 60000
 
+  - capability_id: "nexus_issue_create"
+    display_name: "nexus_issue_create"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "Project name (e.g. mcphub, hatch, axis)"
+        title:
+          type: string
+          description: "Issue title"
+        body:
+          type: string
+          description: "Markdown body of the issue"
+        priority:
+          type: string
+          enum: [HIGH, MEDIUM, LOW, INFO]
+          default: MEDIUM
+          description: "Issue priority"
+      required: [project, title, body]
+    contract:
+      purpose: "Create a new issue in the Nexus issue tracker under a project. Returns the created file path. Modifies local state."
+      may_do:
+        - "Create Markdown files under ~/issue-store/<project>/"
+      must_not_do:
+        - "Delete or modify existing issues"
+        - "Write outside ~/issue-store/"
+      when_to_call:
+        - "A bug, finding, or to-do needs persistent cross-session tracking"
+        - "Recording a problem discovered during investigation"
+      when_not_to_call:
+        - "The task is trivial and does not need cross-session persistence"
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+
+  - capability_id: "nexus_issue_list"
+    display_name: "nexus_issue_list"
+    provider_id: "builtin-hatch"
+    access_class: "safe"
+    rw_boundary: "read"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "Project name (e.g. mcphub, hatch, axis)"
+      required: [project]
+    contract:
+      purpose: "List open issues for a project in the Nexus issue tracker. Read-only."
+      may_do:
+        - "Read directory listings under ~/issue-store/<project>/"
+      must_not_do:
+        - "Modify any files"
+      when_to_call:
+        - "The session needs to know what issues remain open for a project"
+        - "Finding candidate issues to close or update"
+      when_not_to_call:
+        - "Writing or closing issues"
+      side_effect_class: "none"
+      timeout_hint_ms: 5000
+
+  - capability_id: "nexus_issue_close"
+    display_name: "nexus_issue_close"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "Project name"
+        file:
+          type: string
+          description: "Issue filename (from nexus_issue_list)"
+        resolution:
+          type: string
+          description: "Optional resolution note to append before closing"
+      required: [project, file]
+    contract:
+      purpose: "Close an issue by moving it to the closed/ subdirectory with an optional resolution note."
+      may_do:
+        - "Move issue files to closed/ subdirectory"
+        - "Update issue status to CLOSED"
+      must_not_do:
+        - "Delete issue files"
+        - "Close issues outside the project directory"
+      when_to_call:
+        - "An issue has been fully resolved and evidence is recorded"
+        - "The fix has been merged and verified"
+      when_not_to_call:
+        - "The issue is still in progress"
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+
+  - capability_id: "nexus_issue_update"
+    display_name: "nexus_issue_update"
+    provider_id: "builtin-hatch"
+    access_class: "guarded"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "Project name"
+        file:
+          type: string
+          description: "Issue filename (from nexus_issue_list)"
+        addition:
+          type: string
+          description: "Text to append to the issue"
+      required: [project, file, addition]
+    contract:
+      purpose: "Append a status update or additional evidence to an existing issue."
+      may_do:
+        - "Append timestamped text to issue files"
+      must_not_do:
+        - "Delete or truncate existing content"
+        - "Modify files outside the project directory"
+      when_to_call:
+        - "Updating an issue with new findings or progress"
+        - "Recording verification evidence for an in-progress issue"
+      when_not_to_call:
+        - "The issue is ready to close; use nexus_issue_close"
+      side_effect_class: "local_state"
+      timeout_hint_ms: 5000
+
   - capability_id: "task_create"
     display_name: "task_create"
     provider_id: "builtin-hatch"
@@ -365,16 +508,27 @@ capabilities:
     schema:
       type: object
       properties:
-        title: { type: string, description: "Task title" }
-        description: { type: string, description: "Task description or details" }
-        priority: { type: string, enum: [HIGH, MEDIUM, LOW], default: MEDIUM }
+        title:
+          type: string
+          description: "Task title"
+        description:
+          type: string
+          description: "Task description or details"
+        priority:
+          type: string
+          enum: [HIGH, MEDIUM, LOW]
+          default: MEDIUM
       required: [title]
     contract:
       purpose: "Create a persistent task for cross-session tracking."
-      may_do: ["Write tasks to ~/.config/mcphub/tasks.json"]
-      must_not_do: ["Modify other files"]
-      when_to_call: ["A new actionable item is discovered that should survive /clear"]
-      when_not_to_call: ["Volatile in-session reminders; use todowrite"]
+      may_do:
+        - "Write tasks to ~/.config/mcphub/tasks.json"
+      must_not_do:
+        - "Modify other files"
+      when_to_call:
+        - "A new actionable item is discovered that should survive /clear"
+      when_not_to_call:
+        - "Volatile in-session reminders; use todowrite"
       side_effect_class: "local_state"
       timeout_hint_ms: 5000
 
@@ -388,13 +542,20 @@ capabilities:
     schema:
       type: object
       properties:
-        status: { type: string, enum: [open, in_progress, done, all], default: all }
+        status:
+          type: string
+          enum: [open, in_progress, done, all]
+          default: all
     contract:
       purpose: "List persistent tasks with optional status filter."
-      may_do: ["Read ~/.config/mcphub/tasks.json"]
-      must_not_do: ["Modify any files"]
-      when_to_call: ["Session start: review remaining work from previous sessions"]
-      when_not_to_call: ["Creating or updating tasks"]
+      may_do:
+        - "Read ~/.config/mcphub/tasks.json"
+      must_not_do:
+        - "Modify any files"
+      when_to_call:
+        - "Session start: review remaining work from previous sessions"
+      when_not_to_call:
+        - "Creating or updating tasks"
       side_effect_class: "none"
       timeout_hint_ms: 5000
 
@@ -408,16 +569,27 @@ capabilities:
     schema:
       type: object
       properties:
-        id: { type: string, description: "Task ID from task_list" }
-        status: { type: string, enum: [open, in_progress, done], description: "New status (done = 消込)" }
-        note: { type: string, description: "Optional note" }
+        id:
+          type: string
+          description: "Task ID from task_list"
+        status:
+          type: string
+          enum: [open, in_progress, done]
+          description: "New status (done = 消込)"
+        note:
+          type: string
+          description: "Optional note"
       required: [id, status]
     contract:
       purpose: "Update task status. done = 消込."
-      may_do: ["Modify tasks.json"]
-      must_not_do: ["Delete tasks (use task_delete)"]
-      when_to_call: ["Task completed — mark as done for 消込"]
-      when_not_to_call: ["Creating new tasks"]
+      may_do:
+        - "Modify tasks.json"
+      must_not_do:
+        - "Delete tasks (use task_delete)"
+      when_to_call:
+        - "Task completed — mark as done for 消込"
+      when_not_to_call:
+        - "Creating new tasks"
       side_effect_class: "local_state"
       timeout_hint_ms: 5000
 
@@ -431,16 +603,55 @@ capabilities:
     schema:
       type: object
       properties:
-        id: { type: string, description: "Task ID from task_list" }
+        id:
+          type: string
+          description: "Task ID from task_list"
       required: [id]
     contract:
       purpose: "Delete a task permanently."
-      may_do: ["Remove task from tasks.json"]
-      must_not_do: ["Delete non-task files"]
-      when_to_call: ["Task is no longer relevant"]
-      when_not_to_call: ["Task is done — use task_update status=done instead"]
+      may_do:
+        - "Remove task from tasks.json"
+      must_not_do:
+        - "Delete non-task files"
+      when_to_call:
+        - "Task is no longer relevant"
+      when_not_to_call:
+        - "Task is done — use task_update status=done instead"
       side_effect_class: "local_state"
       timeout_hint_ms: 5000
+
+  - capability_id: "mcphub_checkpoint"
+    display_name: "mcphub_checkpoint"
+    provider_id: "mcphub-internal"
+    access_class: "safe"
+    rw_boundary: "write"
+    enabled: true
+    priority: 10
+    schema:
+      type: object
+      properties:
+        message:
+          type: string
+          description: "Handover message — what was done, what remains, context for next session"
+        project:
+          type: string
+          description: "Project name for nexus issue listing (optional)"
+      required: [message]
+    contract:
+      purpose: "Save current session state (tasks, nexus issues, handover note) as a persistent checkpoint for next-session handoff."
+      may_do:
+        - "Read tasks.json and issue-store directory"
+        - "Write checkpoint state to MCPHUB data directory"
+      must_not_do:
+        - "Modify task state or nexus issues (only reads them)"
+        - "Delete existing checkpoints"
+      when_to_call:
+        - "A session is ending and context needs to persist"
+        - "Before a /clear or session close"
+      when_not_to_call:
+        - "A simple one-step task with no persistent context needed"
+      side_effect_class: "local_state"
+      timeout_hint_ms: 10000
 
   # -----------------------------------------------------------------------
   # Relay providers: configure in ~/.config/mcphub/relays.yaml
@@ -453,4 +664,18 @@ policy:
       tool_pattern: "*"
       action: "allow"
       priority: 1
+      scope: "global"
+
+    # Verdict provider: destructive reset tools denied by default.
+    # Operators must explicitly grant access via a session rule to use these.
+    - rule_id: "deny-test-db-reset"
+      tool_pattern: "test_db_reset"
+      action: "deny"
+      priority: 9000
+      scope: "global"
+
+    - rule_id: "deny-test-cleanup-reset"
+      tool_pattern: "test_cleanup_reset"
+      action: "deny"
+      priority: 9000
       scope: "global"
